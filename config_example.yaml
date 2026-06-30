@@ -11,6 +11,17 @@ label_map:
   51: "clavicula_right"
 
 seg_metric_organs:
+  - heart
+  - liver
+  - spleen
+  - pancreas
+  - kidney_left
+  - kidney_right
+  - stomach
+  - aorta
+  - inferior_vena_cava
+seg_mean_organs:
+  - heart
   - liver
   - spleen
   - pancreas
@@ -21,7 +32,6 @@ seg_metric_organs:
   - aorta
   - inferior_vena_cava
   - portal_vein_and_splenic_vein
+  - duodenum
   - small_bowel
   - colon
-  - duodenum
-  - urinary_bladder

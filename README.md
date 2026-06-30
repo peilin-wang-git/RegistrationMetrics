@@ -114,10 +114,26 @@ Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, 
 
 ## Segmentation organ metric scope
 
-To reduce runtime and CSV width, individual Dice/IoU/HD95/ASSD columns are emitted only for selected abdominal organs by default:
+To reduce runtime and CSV width, individual Dice/IoU/HD95/ASSD columns are emitted only for the selected major heart-to-kidney organs by default:
 
 ```yaml
 seg_metric_organs:
+  - heart
+  - liver
+  - spleen
+  - pancreas
+  - kidney_left
+  - kidney_right
+  - stomach
+  - aorta
+  - inferior_vena_cava
+```
+
+The `mean_*_all_organs_*` column names are kept stable, but `all_organs` now means the default `SEG_MEAN_ORGANS` heart-to-kidney organ set, not every foreground label:
+
+```yaml
+seg_mean_organs:
+  - heart
   - liver
   - spleen
   - pancreas
@@ -128,10 +144,9 @@ seg_metric_organs:
   - aorta
   - inferior_vena_cava
   - portal_vein_and_splenic_vein
+  - duodenum
   - small_bowel
   - colon
-  - duodenum
-  - urinary_bladder
 ```
 
-All foreground labels in the label map still participate in `mean_dice_all_organs_*`, `mean_iou_all_organs_*`, `mean_hd95_all_organs_*`, and `mean_assd_all_organs_*` columns. Non-selected organs no longer emit individual segmentation metric columns. Override the selected organs with `seg_metric_organs` in YAML or `--seg-metric-organs liver,spleen,...`; pass `--verbose-seg-mean` to debug-log every label that contributes to all-organ means.
+Non-selected mean-only organs such as gallbladder, duodenum, small_bowel, and colon do not emit individual segmentation metric columns unless included in `seg_metric_organs`. Override individual-output organs with `seg_metric_organs` in YAML or `--seg-metric-organs ...`; override mean organs independently with `seg_mean_organs` in YAML or `--seg-mean-organs ...`; pass `--verbose-seg-mean` to debug-log every label decision for segmentation means.

@@ -25,7 +25,8 @@ DEFAULT_LABEL_MAP: dict[int, str] = {
     61: "scapula_left", 62: "scapula_right", 63: "spinal_cord", 64: "vertebrae",
 }
 MOTION_ORGANS = ["liver", "spleen", "pancreas", "kidney_left", "kidney_right", "kidney"]
-SEG_METRIC_ORGANS = ["liver", "spleen", "pancreas", "kidney_left", "kidney_right", "stomach", "gallbladder", "aorta", "inferior_vena_cava", "portal_vein_and_splenic_vein", "small_bowel", "colon", "duodenum", "urinary_bladder"]
+SEG_METRIC_ORGANS = ["heart", "liver", "spleen", "pancreas", "kidney_left", "kidney_right", "stomach", "aorta", "inferior_vena_cava"]
+SEG_MEAN_ORGANS = ["heart", "liver", "spleen", "pancreas", "kidney_left", "kidney_right", "stomach", "gallbladder", "aorta", "inferior_vena_cava", "portal_vein_and_splenic_vein", "duodenum", "small_bowel", "colon"]
 DIRECTIONS = ["AP", "RL", "SI"]
 REQUIRED_OUTPUT_COLUMNS = ["case_id", "fixed_img_path", "moving_img_path", "warped_img_path", "fixed_seg_path", "moving_seg_path", "warped_seg_path", "transform_path", "Method", "Center", "Modality", "Task", "Organ", "AnalysisGroup", "Frame", "status", "error_message", "skip_reason", "runtime_seconds"]
 
@@ -50,7 +51,7 @@ def load_config(path: str | Path) -> dict[str, dict[str, dict[str, Any]]]:
         raise ValueError("[CONFIG] config must be a dictionary of methods and groups")
     if "CONFIG" in cfg and isinstance(cfg["CONFIG"], dict):
         loaded = dict(cfg["CONFIG"])
-        for special_key in ["label_map", "seg_metric_organs"]:
+        for special_key in ["label_map", "seg_metric_organs", "seg_mean_organs"]:
             if special_key in cfg:
                 loaded[special_key] = cfg[special_key]
         return loaded
@@ -78,3 +79,17 @@ def resolve_seg_metric_organs(config: dict[str, Any] | None = None, cli_organs: 
             return [x.strip() for x in cfg_organs.split(",") if x.strip()]
         return [str(x).strip() for x in cfg_organs if str(x).strip()]
     return list(SEG_METRIC_ORGANS)
+
+
+def resolve_seg_mean_organs(config: dict[str, Any] | None = None, cli_organs: str | list[str] | None = None) -> list[str]:
+    """Resolve segmentation mean organs from CLI, config, or defaults."""
+    if cli_organs:
+        if isinstance(cli_organs, str):
+            return [x.strip() for x in cli_organs.split(",") if x.strip()]
+        return [str(x).strip() for x in cli_organs if str(x).strip()]
+    cfg_organs = (config or {}).get("seg_mean_organs") if isinstance(config, dict) else None
+    if cfg_organs:
+        if isinstance(cfg_organs, str):
+            return [x.strip() for x in cfg_organs.split(",") if x.strip()]
+        return [str(x).strip() for x in cfg_organs if str(x).strip()]
+    return list(SEG_MEAN_ORGANS)
