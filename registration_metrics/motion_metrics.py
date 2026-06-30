@@ -76,11 +76,11 @@ def _shift(b: BBox, ax: int, step: int) -> BBox:
     x = list(b); x[2*ax] += step; x[2*ax+1] += step; return tuple(x)
 
 
-def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: np.ndarray, target_bound: BBox, affine: np.ndarray, case_id: str, frame: int, organ: str, mode: str, block: int = 5, length: int = 24, max_iter: int = 20, row_index=None, device="cpu", ncc_batch_size: int = 64) -> BBox | None:
+def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: np.ndarray, target_bound: BBox, affine: np.ndarray, case_id: str, frame: int, organ: str, mode: str, block: int = 5, length: int = 24, max_iter: int = 20, row_index=None, device="cpu", ncc_batch_size: int = 64, invalid_candidate_policy: str = "nan") -> BBox | None:
     """Iteratively match target ROI to reference ROI by positive NCC, selecting argmax candidates."""
     half = length // 2
     LOGGER.info("[MATCH_NCC START] case=%s, frame=%s, organ=%s, mode=%s", case_id, frame, organ, mode)
-    LOGGER.info("[MATCH_NCC PARAM] block=%s, length=%s, half_length=%s, max_iter=%s, ncc_batch_size=%s, device=%s", block, length, half, max_iter, ncc_batch_size, device_name(device))
+    LOGGER.info("[MATCH_NCC PARAM] block=%s, length=%s, half_length=%s, max_iter=%s, ncc_batch_size=%s, device=%s invalid_candidate_policy=%s", block, length, half, max_iter, ncc_batch_size, device_name(device), invalid_candidate_policy)
     LOGGER.info("[MATCH_NCC INPUT] ref image shape=%s, target image shape=%s", reference_image.shape, target_image.shape)
     LOGGER.info("[MATCH_NCC INPUT] ref bbox=%s, target bbox=%s", reference_bound, target_bound)
     rb, tb = equal_range(reference_bound, target_bound, reference_image.shape[:3])
@@ -96,6 +96,8 @@ def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: 
         for ax in range(3):
             for step in range(-half, half + 1):
                 cand = _shift(tmp, ax, step); roi = _crop(target_image, cand, adjusted); valid = roi is not None and roi.shape == ref_roi.shape
+                if not valid and invalid_candidate_policy == "zero_roi":
+                    roi = np.zeros_like(ref_roi); valid = True
                 candidates.append((ax, step, valid, roi))
         for start in range(0, len(candidates), ncc_batch_size):
             batch = candidates[start:start+ncc_batch_size]
@@ -120,12 +122,26 @@ def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: 
             for ax, step, valid, roi in batch:
                 ncc = next(vi) if valid else float("nan")
                 scores.append(ncc); LOGGER.debug("[MATCH_NCC CAND] axis=axis%s, step=%s, valid=%s, ncc=%s", ax, step, valid, ncc)
-        if not np.isfinite(scores).any(): LOGGER.info("[MATCH_NCC END] all candidate NCC are nan"); return None
+        n_finite = int(np.isfinite(scores).sum()); n_nan = int(len(scores) - n_finite)
+        LOGGER.info("[MATCH_NCC SUMMARY] case=%s row=%s frame=%s organ=%s mode=%s iter=%s n_candidates=%s n_finite=%s n_nan=%s", case_id, row_index, frame, organ, mode, it, len(scores), n_finite, n_nan)
+        if not np.isfinite(scores).any():
+            LOGGER.info("[MATCH_NCC SKIP] case=%s row=%s frame=%s organ=%s mode=%s reason=all_candidate_scores_nan metric_columns_set_to_nan=True", case_id, row_index, frame, organ, mode)
+            return None
         collect_ncc.append(scores); arr = np.asarray(scores, dtype=float)
         best_steps = []
         for ax in range(3):
-            sl = arr[ax*(length+1):(ax+1)*(length+1)]; best_steps.append(int(np.nanargmax(sl) - half))
-        center_ncc = arr[half]
+            sl = arr[ax*(length+1):(ax+1)*(length+1)]
+            finite = np.isfinite(sl)
+            if finite.any():
+                best_idx = int(np.nanargmax(sl)); best_step = best_idx - half; axis_status = "valid"; best_score_axis = float(sl[best_idx])
+            else:
+                # Old code avoided all-NaN axis segments by substituting invalid candidates with zero ROIs.
+                # New strict NaN policy keeps invalid candidates as NaN, so an all-NaN axis uses zero step.
+                best_step = 0; axis_status = "all_nan_use_zero_step"; best_score_axis = float("nan")
+            best_steps.append(best_step)
+            LOGGER.info("[MATCH_NCC AXIS] case=%s row=%s frame=%s organ=%s mode=%s iter=%s axis=%s n_candidates=%s n_finite=%s n_nan=%s best_step=%s status=%s best_score=%s", case_id, row_index, frame, organ, mode, it, ax, len(sl), int(finite.sum()), int(len(sl)-finite.sum()), best_step, axis_status, best_score_axis)
+        center_ncc = arr[half] if len(arr) > half else float("nan")
+        if not np.isfinite(center_ncc): LOGGER.info("[MATCH_NCC CENTER] case=%s row=%s frame=%s organ=%s mode=%s iter=%s center_score=nan", case_id, row_index, frame, organ, mode, it)
         best_ncc = float(np.nanmax(arr)); proposed = tmp
         for ax, st in enumerate(best_steps): proposed = _shift(proposed, ax, st)
         flag = sum(abs(s) for s in best_steps); cycle = proposed in collect; one_side = False

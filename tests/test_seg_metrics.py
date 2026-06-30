@@ -84,3 +84,24 @@ def test_seg_mean_ignores_nan_and_all_nan():
     assert np.isclose(out["mean_dice_all_organs_moving_fixed"], 1.0)
     empty_out = compute_segmentation_metrics(np.zeros_like(fixed), np.zeros_like(fixed), np.zeros_like(fixed), label_map, (1, 1, 1), "case", 0, min_mask_volume_voxels=1)
     assert np.isnan(empty_out["mean_dice_all_organs_moving_fixed"])
+
+
+def test_all_metrics_are_3d_not_2d_slice_mean():
+    from registration_metrics.image_metrics import mse, normalized_cross_correlation_similarity, normalized_mutual_information, ssim_3d_volume
+    a = np.zeros((5, 5, 5), dtype=float)
+    b = np.zeros_like(a)
+    a[:, :, 0] = 100.0
+    b[:, :, 0] = -100.0
+    assert np.isclose(mse(a, b), np.mean((a - b) ** 2))
+    assert np.isfinite(normalized_cross_correlation_similarity(a, b))
+    assert np.isfinite(normalized_mutual_information(a, b))
+    assert np.isnan(ssim_3d_volume(np.zeros((2, 2, 2)), np.zeros((2, 2, 2))))
+    fixed = np.zeros((5, 5, 5), dtype=int)
+    moving = np.zeros_like(fixed)
+    warped = np.zeros_like(fixed)
+    fixed[1:4, 1:4, 1:4] = 17
+    moving[1:4, 1:4, 1:4] = 17
+    warped[2:5, 1:4, 1:4] = 17
+    out = compute_segmentation_metrics(fixed, moving, warped, {0:"background", 17:"heart"}, (1, 1, 1), "case", 0, min_mask_volume_voxels=1)
+    assert out["dice_heart_moving_fixed"] == 1.0
+    assert out["dice_heart_warped_fixed"] < 1.0

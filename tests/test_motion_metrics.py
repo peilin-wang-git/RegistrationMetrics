@@ -63,3 +63,31 @@ def test_motion_volume_ratio_mismatch(monkeypatch):
     out = mm.compute_organ_ncc_moves(np.ones((10,10,10)), np.ones((10,10,10)), np.ones((10,10,10)), fixed_seg, moving_seg, warped_seg, {27:"liver"}, np.eye(4), "case", 0, organs=["liver"])
     assert out["liverNCCMoveFallbackUsed"] is True
     assert out["liverNCCMoveMaskVolumeRatio"] < 0.20
+
+
+def test_match_ncc_axis_all_nan_no_crash(monkeypatch):
+    import registration_metrics.motion_metrics as mm
+    vals = iter([np.nan, np.nan, np.nan, 0.1, 0.2, 0.3, 0.1, 0.2, 0.3])
+    monkeypatch.setattr(mm, "normalized_cross_correlation_similarity", lambda *args, **kwargs: next(vals))
+    img = np.arange(216, dtype=float).reshape(6, 6, 6)
+    bbox = (2, 4, 2, 4, 2, 4)
+    out = mm.match_ncc(img, bbox, img, bbox, np.eye(4), "case", 0, "liver", "pred", block=0, length=2, max_iter=1)
+    assert out is not None
+
+
+def test_match_ncc_all_candidates_nan_returns_none(monkeypatch):
+    import registration_metrics.motion_metrics as mm
+    monkeypatch.setattr(mm, "normalized_cross_correlation_similarity", lambda *args, **kwargs: float("nan"))
+    img = np.arange(216, dtype=float).reshape(6, 6, 6)
+    bbox = (2, 4, 2, 4, 2, 4)
+    assert mm.match_ncc(img, bbox, img, bbox, np.eye(4), "case", 0, "liver", "pred", block=0, length=2, max_iter=1) is None
+
+
+def test_compute_organ_ncc_moves_match_ncc_none_sets_nan(monkeypatch):
+    import registration_metrics.motion_metrics as mm
+    monkeypatch.setattr(mm, "match_ncc", lambda *args, **kwargs: None)
+    seg = np.zeros((8, 8, 8), dtype=int)
+    _cube(seg, 27, 1, 5)
+    out = mm.compute_organ_ncc_moves(np.ones((8,8,8)), np.ones((8,8,8)), np.ones((8,8,8)), seg, seg, seg, {27:"liver"}, np.eye(4), "case", 0, organs=["liver"])
+    assert np.isnan(out["liverNCCMove_AP"])
+    assert np.isnan(out["liverNCCMoveGT_AP"])

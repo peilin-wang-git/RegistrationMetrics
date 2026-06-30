@@ -161,3 +161,7 @@ severe_volume_ratio_threshold: 0.20
 ```
 
 When one side is unreliable and image geometry is compatible, the more reliable side's bbox is reused as the initial search bbox on the unreliable image before NCC matching. If both masks are invalid, NCCMove/NCCMoveGT displacement columns are set to NaN and diagnostic fallback columns record the skip reason.
+
+## 3D volume metric mode
+
+Metrics are volume-based for each 3D frame: LCC/NCC, MSE, NMI, SSIM, Dice, IoU, HD95, ASSD, organ-specific segmentation metrics, and mean segmentation metrics operate on full 3D volumes or 3D masks. For 4D inputs, the pipeline processes each frame as an independent 3D volume. SSIM uses skimage's n-dimensional `structural_similarity` on the full 3D volume with `channel_axis=None`, an automatically selected odd `win_size`, and a finite-voxel `data_range`; volumes too small for 3D SSIM return NaN with an `[SSIM SKIP]` log rather than falling back to 2D slice averaging.

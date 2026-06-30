@@ -96,6 +96,10 @@ def compute_segmentation_metrics(fixed_seg: np.ndarray, moving_seg: np.ndarray, 
         mm = moving_seg == label
         wm = warped_seg == label
         LOGGER.info("[SEG] case=%s, frame=%s, organ=%s, label=%s", case_id, frame, organ, label)
+        LOGGER.info("[METRIC MODE] metric=Dice mode=3D organ=%s label=%s", organ, label)
+        LOGGER.info("[METRIC MODE] metric=IoU mode=3D organ=%s label=%s", organ, label)
+        LOGGER.info("[METRIC MODE] metric=HD95 mode=3D spacing=%s", spacing)
+        LOGGER.info("[METRIC MODE] metric=ASSD mode=3D spacing=%s", spacing)
         LOGGER.info("[SEG] fixed voxels=%s, moving voxels=%s, warped voxels=%s", int(fm.sum()), int(mm.sum()), int(wm.sum()))
         for suffix, mask in [("moving_fixed", mm), ("warped_fixed", wm)]:
             pair_label = suffix.replace("_", "-")
