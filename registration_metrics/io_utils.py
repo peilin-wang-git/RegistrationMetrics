@@ -85,6 +85,28 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def normalize_intensity_0_1(image: np.ndarray, image_name: str, case_id: str, row_index: int) -> np.ndarray:
+    """Normalize one intensity image to [0, 1] using finite-voxel min/max."""
+    x = np.asarray(image, dtype=np.float32)
+    finite = np.isfinite(x)
+    finite_voxels = int(finite.sum())
+    if finite_voxels == 0:
+        LOGGER.warning("[INTENSITY NORM] case_id=%s row=%s image=%s reason=no_finite_voxels normalized=set_to_nan", case_id, row_index, image_name)
+        return np.full(x.shape, np.nan, dtype=np.float32)
+    vals = x[finite]
+    raw_min = float(vals.min()); raw_max = float(vals.max()); raw_mean = float(vals.mean()); raw_std = float(vals.std())
+    if raw_max == raw_min:
+        LOGGER.warning("[INTENSITY NORM] case_id=%s row=%s image=%s reason=constant_image raw_min=%s raw_max=%s normalized=set_to_zeros", case_id, row_index, image_name, raw_min, raw_max)
+        out = np.zeros(x.shape, dtype=np.float32)
+        out[~finite] = np.nan
+        return out
+    out = ((x - raw_min) / (raw_max - raw_min)).astype(np.float32)
+    out[~finite] = np.nan
+    normalized_vals = out[np.isfinite(out)]
+    LOGGER.info("[INTENSITY NORM] case_id=%s row=%s image=%s finite_voxels=%s raw_min=%s raw_max=%s raw_mean=%s raw_std=%s normalized_min=%s normalized_max=%s dtype=%s device=cpu", case_id, row_index, image_name, finite_voxels, raw_min, raw_max, raw_mean, raw_std, float(normalized_vals.min()), float(normalized_vals.max()), out.dtype)
+    return out
+
+
 def _frame_value(r: dict[str, Any]) -> Any:
     return r.get("frame", r.get("Frame", 0)) if pd.notna(r.get("frame", r.get("Frame", 0))) else 0
 
@@ -121,7 +143,9 @@ def compute_single_case_task(task: CaseTask) -> dict[str, Any]:
             LOGGER.info("[LOAD 3D] %s shape=%s", snames[k], arr.shape)
             if arr.ndim != 3:
                 reason=_non3d_skip(case, task.row_index, r.get(k), arr); row=base|{"status":"skipped","skip_reason":reason,"runtime_seconds":time.time()-t0}; return {"success":False,"row_index":task.row_index,"case_id":case,"result_rows":[row],"error_rows":[row],"runtime_seconds":time.time()-t0}
-        fixed=data["fixed_img_path"]; moving=data["moving_img_path"]; warped=data["warped_img_path"]
+        fixed=normalize_intensity_0_1(data["fixed_img_path"], "fixed", case, task.row_index)
+        moving=normalize_intensity_0_1(data["moving_img_path"], "moving", case, task.row_index)
+        warped=normalize_intensity_0_1(data["warped_img_path"], "warped", case, task.row_index)
         fseg=sdata["fixed_seg_path"]; mseg=sdata["moving_seg_path"]; wseg=sdata["warped_seg_path"]
         row=base.copy()
         if fixed.shape != moving.shape or fixed.shape != warped.shape:
