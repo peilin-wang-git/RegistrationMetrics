@@ -1,0 +1,11 @@
+CONFIG:
+  DDEM:
+    "Institution A | Liver | T1w-4D":
+      center: "Institution A"
+      modality: "T1w-4D"
+      task: "T1w-4D"
+      organ: "liver"
+      csv_path: "/path/to/result.csv"
+      output_dir: "./metrics_out"
+label_map:
+  51: "clavicula_right"
