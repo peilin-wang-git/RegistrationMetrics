@@ -55,10 +55,16 @@ def compute_dvf_metrics(transform_path: str | Path, case_id: str, save_jacobian_
     LOGGER.info("[DVF] inferred vector axis=%s", axis); LOGGER.info("[DVF] spacing=%s", spacing)
     LOGGER.info("[DVF METRIC] dvf_shape=%s, spacing=%s, vector_axis=%s, device=%s", dvf.shape, spacing, axis, device_name(device))
     for c in range(3): LOGGER.info("[DVF] displacement component=%s min=%s max=%s mean=%s", c, float(np.nanmin(dvf[..., c])), float(np.nanmax(dvf[..., c])), float(np.nanmean(dvf[..., c])))
-    det = jacobian_determinant(dvf, spacing, device=device); valid = np.isfinite(det); fold = valid & (det <= 0)
-    out = {"jacobian_min": float(np.nanmin(det)), "jacobian_max": float(np.nanmax(det)), "jacobian_mean": float(np.nanmean(det)), "jacobian_std": float(np.nanstd(det)), "num_folding_voxels": int(fold.sum()), "folding_ratio": float(fold.sum() / max(int(valid.sum()), 1))}
+    det = jacobian_determinant(dvf, spacing, device=device); valid = np.isfinite(det); total_voxels = int(valid.sum()); fold = valid & (det <= 0); num_folding_voxels = int(fold.sum())
+    if total_voxels == 0:
+        LOGGER.warning("[DVF METRIC] case_id=%s total_voxels=0; folding_ratio=nan", case_id)
+        folding_ratio = float("nan")
+    else:
+        folding_ratio = float(num_folding_voxels / total_voxels)
+    out = {"jacobian_min": float(np.nanmin(det)), "jacobian_max": float(np.nanmax(det)), "jacobian_mean": float(np.nanmean(det)), "jacobian_std": float(np.nanstd(det)), "total_voxels": total_voxels, "num_folding_voxels": num_folding_voxels, "folding_ratio": folding_ratio}
     LOGGER.info("[DVF] jacobian min/max/mean/std=%s/%s/%s/%s", out["jacobian_min"], out["jacobian_max"], out["jacobian_mean"], out["jacobian_std"])
     LOGGER.info("[DVF] folding voxels=%s, folding_ratio=%s", out["num_folding_voxels"], out["folding_ratio"])
+    LOGGER.info("[DVF METRIC] case_id=%s total_voxels=%s num_folding_voxels=%s folding_ratio=%s", case_id, out["total_voxels"], out["num_folding_voxels"], out["folding_ratio"])
     LOGGER.info("[DVF METRIC] jacobian_mean=%s, jacobian_var=%s, folding_ratio=%s", out["jacobian_mean"], float(np.nanvar(det)), out["folding_ratio"])
     if save_jacobian_path:
         nib.save(nib.Nifti1Image(det.astype(np.float32), img.affine), str(save_jacobian_path)); LOGGER.info("[SAVE] jacobian determinant map=%s", save_jacobian_path)

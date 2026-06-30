@@ -4,9 +4,9 @@ RegistrationMetrics 是一个用于跨模态医学图像配准指标计算与可
 
 ## 功能
 
-- 全局图像指标：NMI、SSIM、LCC/NCC、MSE。
+- 全局图像指标：NMI、SSIM、LCC/NCC、MSE。NMI 使用 scikit-learn `normalized_mutual_info_score`（arithmetic average）定义，连续强度先用共享 bin edges 离散化，输出范围为 0 到 1。
 - 分割指标：每个 label 和 foreground 的 Dice、IoU、HD95、ASSD；HD95/ASSD 使用 physical spacing，单位 mm。
-- DVF 指标：Jacobian determinant min/max/mean/std、folding voxel 数量和 folding ratio。
+- DVF 指标：Jacobian determinant min/max/mean/std、参与统计的 total_voxels、folding voxel 数量和 folding ratio。
 - Organ ROI + NCCMove：对 liver、spleen、pancreas、kidney_left、kidney_right 和可选 kidney 执行 largest connected component bbox、equal range、iterative NCC ROI matching。
 - Motion 指标：frame-level 和 case-level MovementError、AMD、RMSE、MAPE、PCC、AmplitudeAMD。
 - VertebraNCC：从 multi-label segmentation 中的 vertebra labels 裁剪 ROI，计算 moving-fixed 和 warped-fixed NCC。
@@ -89,7 +89,7 @@ python -m registration_metrics.cli all \
 
 ## Incremental saving and summary
 
-During `compute`/`all`, results are appended to `detailed_progress.csv` after each input CSV row finishes. Failures are appended to `error_log.csv` immediately. After processing completes, the program reloads `detailed_progress.csv` from disk and writes `summary_by_group.csv` and `summary_overall.csv`. Variance in summaries uses pandas `var` default `ddof=1`.
+During `compute`/`all`, each input CSV row is treated as one pre-split 3D case; 4D images or segmentations are skipped with `[SKIP NON-3D]`. Results are appended to `detailed_progress.csv` after each input CSV row finishes. Failures are appended to `error_log.csv` immediately. With `--num-workers > 1`, worker processes compute cases and the main process is the only writer for progress/error CSV files as futures complete. After processing completes, the program reloads `detailed_progress.csv` from disk and writes `summary_by_group.csv` and `summary_overall.csv`. Variance in summaries uses pandas `var` default `ddof=1`.
 
 ## GPU acceleration
 
@@ -110,7 +110,11 @@ python -m registration_metrics.cli compute \
   --ncc-batch-size 64
 ```
 
-Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, and organ NCCMove/NCCMoveGT candidate NCC batches. NMI and SSIM remain CPU because the current implementations use numpy histogram and skimage. HD95/ASSD remain CPU because the distance transform uses scipy. If CUDA or a GPU metric fails, the code logs `[GPU FALLBACK]` and retries CPU for that metric.
+Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, and organ NCCMove/NCCMoveGT candidate NCC batches. Multiprocessing with GPU can increase memory usage; prefer `--num-workers 1` for GPU runs unless memory headroom has been verified. NMI and SSIM remain CPU because the current implementations use numpy/sklearn binning and skimage. HD95/ASSD remain CPU because the distance transform uses scipy. If CUDA or a GPU metric fails, the code logs `[GPU FALLBACK]` and retries CPU for that metric.
+
+## Dependencies
+
+The NMI implementation requires `scikit-learn` because it intentionally matches `sklearn.metrics.normalized_mutual_info_score`.
 
 ## Segmentation organ metric scope
 
