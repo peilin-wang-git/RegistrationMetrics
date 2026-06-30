@@ -1,6 +1,7 @@
 """Global intensity metrics: NCC/LCC, NMI, SSIM, and MSE."""
 from __future__ import annotations
 
+import importlib.util
 import logging
 import numpy as np
 from skimage.metrics import structural_similarity
@@ -29,16 +30,27 @@ def normalized_cross_correlation_similarity(a: np.ndarray, b: np.ndarray, eps: f
     return float(np.mean((x - x.mean()) * (y - y.mean())) / (x.std() * y.std()))
 
 
-def normalized_mutual_information(a: np.ndarray, b: np.ndarray, bins: int = 64) -> float:
-    """Compute histogram normalized mutual information after removing non-finite pairs."""
+def normalized_mutual_information(a: np.ndarray, b: np.ndarray, bins: int = 64, pair: str = "") -> float:
+    """Compute sklearn-compatible normalized mutual information after shared binning."""
     x = np.asarray(a, dtype=float).ravel(); y = np.asarray(b, dtype=float).ravel()
     m = np.isfinite(x) & np.isfinite(y); x = x[m]; y = y[m]
-    if x.size == 0:
+    if x.size < 2:
+        LOGGER.info("[NMI] pair=%s valid_voxels=%s min=nan max=nan value=nan", pair, x.size)
         return float("nan")
-    hist, _, _ = np.histogram2d(x, y, bins=bins)
-    pxy = hist / np.sum(hist); px = pxy.sum(axis=1); py = pxy.sum(axis=0)
-    hx = -np.sum(px[px > 0] * np.log(px[px > 0])); hy = -np.sum(py[py > 0] * np.log(py[py > 0])); hxy = -np.sum(pxy[pxy > 0] * np.log(pxy[pxy > 0]))
-    return float((hx + hy) / hxy) if hxy > 0 else float("nan")
+    combined = np.concatenate([x, y])
+    mn = float(np.min(combined)); mx = float(np.max(combined))
+    if mn == mx:
+        LOGGER.info("[NMI] pair=%s valid_voxels=%s min=%s max=%s value=nan", pair, x.size, mn, mx)
+        return float("nan")
+    edges = np.histogram_bin_edges(combined, bins=bins)
+    x_bins = np.digitize(x, edges[1:-1]); y_bins = np.digitize(y, edges[1:-1])
+    if importlib.util.find_spec("sklearn") is None:
+        raise ImportError("scikit-learn is required for NMI because NMI must match sklearn.metrics.normalized_mutual_info_score")
+    from sklearn.metrics import normalized_mutual_info_score
+    nmi = normalized_mutual_info_score(x_bins, y_bins, average_method="arithmetic")
+    nmi = float(np.clip(nmi, 0.0, 1.0))
+    LOGGER.info("[NMI] pair=%s valid_voxels=%s min=%s max=%s value=%s", pair, x.size, mn, mx, nmi)
+    return nmi
 
 
 def ssim_3d_volume(a: np.ndarray, b: np.ndarray) -> float:
@@ -96,8 +108,9 @@ def compute_global_metrics(fixed: np.ndarray, moving: np.ndarray, warped: np.nda
     if str(device) != "cpu":
         LOGGER.info("[GPU] metric=NMI device=cpu reason=torch histogram not enabled")
         LOGGER.info("[GPU] metric=SSIM device=cpu reason=skimage SSIM CPU backend")
+    LOGGER.info("[NMI] definition=sklearn.normalized_mutual_info_score average_method=arithmetic bins=%s mode=3D", bins)
     out = {
-        "nmi_moving_fixed": normalized_mutual_information(moving, fixed, bins), "nmi_warped_fixed": normalized_mutual_information(warped, fixed, bins),
+        "nmi_moving_fixed": normalized_mutual_information(moving, fixed, bins, pair="moving-fixed"), "nmi_warped_fixed": normalized_mutual_information(warped, fixed, bins, pair="warped-fixed"),
         "ssim_moving_fixed": ssim_3d_volume(moving, fixed), "ssim_warped_fixed": ssim_3d_volume(warped, fixed),
         "lcc_moving_fixed": normalized_cross_correlation_similarity(moving, fixed, device=device, metric_name="LCC", pair="moving-fixed", case_id=case_id, row_index=row_index, frame=frame), "lcc_warped_fixed": normalized_cross_correlation_similarity(warped, fixed, device=device, metric_name="LCC", pair="warped-fixed", case_id=case_id, row_index=row_index, frame=frame),
         "mse_moving_fixed": mse(moving, fixed, device=device, case_id=case_id, pair="moving-fixed"), "mse_warped_fixed": mse(warped, fixed, device=device, case_id=case_id, pair="warped-fixed"),

@@ -53,7 +53,7 @@ def load_config(path: str | Path) -> dict[str, dict[str, dict[str, Any]]]:
         raise ValueError("[CONFIG] config must be a dictionary of methods and groups")
     if "CONFIG" in cfg and isinstance(cfg["CONFIG"], dict):
         loaded = dict(cfg["CONFIG"])
-        for special_key in ["label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold"]:
+        for special_key in ["label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold", "nmi_bins"]:
             if special_key in cfg:
                 loaded[special_key] = cfg[special_key]
         return loaded
