@@ -150,3 +150,14 @@ seg_mean_organs:
 ```
 
 Non-selected mean-only organs such as gallbladder, duodenum, small_bowel, and colon do not emit individual segmentation metric columns unless included in `seg_metric_organs`. Override individual-output organs with `seg_metric_organs` in YAML or `--seg-metric-organs ...`; override mean organs independently with `seg_mean_organs` in YAML or `--seg-mean-organs ...`; pass `--verbose-seg-mean` to debug-log every label decision for segmentation means.
+
+## Motion mask quality fallback
+
+For organ NCCMove/NCCMoveGT, masks with volume below `min_mask_volume_voxels` are treated as missing or too small, and severe pairwise volume mismatch below `severe_volume_ratio_threshold` marks the smaller side unreliable. Defaults are:
+
+```yaml
+min_mask_volume_voxels: 20
+severe_volume_ratio_threshold: 0.20
+```
+
+When one side is unreliable and image geometry is compatible, the more reliable side's bbox is reused as the initial search bbox on the unreliable image before NCC matching. If both masks are invalid, NCCMove/NCCMoveGT displacement columns are set to NaN and diagnostic fallback columns record the skip reason.

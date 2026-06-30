@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 import numpy as np
 import pandas as pd
 from skimage.measure import label as cc_label
@@ -140,6 +141,68 @@ def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: 
     return tmp
 
 
+
+def _clamp_bbox_to_shape(bbox: BBox | None, shape: tuple[int, ...]) -> BBox | None:
+    """Return a copied bbox clamped to image shape, or None if invalid after clamp."""
+    if bbox is None:
+        return None
+    b = list(deepcopy(bbox))
+    for ax in range(3):
+        b[2 * ax] = max(0, min(int(b[2 * ax]), int(shape[ax])))
+        b[2 * ax + 1] = max(0, min(int(b[2 * ax + 1]), int(shape[ax])))
+        if b[2 * ax] >= b[2 * ax + 1]:
+            return None
+    return tuple(b)
+
+
+def choose_bboxes_with_volume_fallback(reference_mask: np.ndarray, target_mask: np.ndarray, reference_bbox: BBox | None, target_bbox: BBox | None, reference_name: str, target_name: str, organ: str, case_id: str, frame: int, row_index, reference_image_shape: tuple[int, ...], target_image_shape: tuple[int, ...], reference_affine: np.ndarray, target_affine: np.ndarray, mode: str, min_mask_volume_voxels: int = 20, severe_volume_ratio_threshold: float = 0.20) -> dict:
+    """Choose reference/target bboxes with volume-based fallback for unreliable masks."""
+    rv = int(np.count_nonzero(reference_mask)); tv = int(np.count_nonzero(target_mask))
+    larger = max(rv, tv); smaller = min(rv, tv)
+    ratio = float(smaller / larger) if larger > 0 else float("nan")
+    pair = f"{reference_name}-{target_name}"
+    ref_invalid = rv < min_mask_volume_voxels
+    tgt_invalid = tv < min_mask_volume_voxels
+    if larger < min_mask_volume_voxels:
+        status = "both_invalid"
+    elif ref_invalid or (rv < tv and ratio < severe_volume_ratio_threshold):
+        status = f"{reference_name}_unreliable"
+    elif tgt_invalid or (tv < rv and ratio < severe_volume_ratio_threshold):
+        status = f"{target_name}_unreliable"
+    else:
+        status = "ok"
+    LOGGER.info("[MOTION MASK CHECK] case=%s row=%s frame=%s organ=%s mode=%s pair=%s %s_volume=%s %s_volume=%s ratio=%s threshold=%s status=%s", case_id, row_index, frame, organ, mode, pair, reference_name, rv, target_name, tv, ratio, severe_volume_ratio_threshold, status)
+    result = {"reference_bbox": _clamp_bbox_to_shape(reference_bbox, reference_image_shape), "target_bbox": _clamp_bbox_to_shape(target_bbox, target_image_shape), "reference_volume": rv, "target_volume": tv, "volume_ratio": ratio, "fallback_used": False, "fallback_side": None, "fallback_reason": "", "valid": True, "skip_reason": ""}
+    if status == "both_invalid":
+        result.update(valid=False, skip_reason="both masks missing_or_too_small")
+        LOGGER.warning("[MOTION SKIP] case=%s row=%s frame=%s organ=%s mode=%s reason=both masks missing_or_too_small %s_volume=%s %s_volume=%s metric_columns_set_to_nan=True", case_id, row_index, frame, organ, mode, reference_name, rv, target_name, tv)
+        return result
+    shape_compatible = tuple(reference_image_shape[:3]) == tuple(target_image_shape[:3])
+    affine_compatible = np.allclose(reference_affine, target_affine, atol=1e-3, rtol=1e-3)
+    if status != "ok" and (not shape_compatible or not affine_compatible):
+        result.update(valid=False, skip_reason="shape_or_affine_incompatible_for_bbox_fallback")
+        LOGGER.warning("[MOTION SKIP] case=%s row=%s frame=%s organ=%s mode=%s reason=shape_or_affine_incompatible_for_bbox_fallback %s_shape=%s %s_shape=%s", case_id, row_index, frame, organ, mode, reference_name, reference_image_shape, target_name, target_image_shape)
+        return result
+    if status == f"{reference_name}_unreliable":
+        fallback_bbox = _clamp_bbox_to_shape(target_bbox, reference_image_shape)
+        if fallback_bbox is None or result["target_bbox"] is None:
+            result.update(valid=False, skip_reason="fallback_bbox_invalid")
+            return result
+        reason = f"{reference_name} mask invalid or much smaller; using {target_name} bbox as {reference_name} initial bbox"
+        result.update(reference_bbox=fallback_bbox, fallback_used=True, fallback_side="reference", fallback_reason=reason)
+        LOGGER.warning("[MOTION BBOX FALLBACK] case=%s row=%s frame=%s organ=%s mode=%s unreliable_side=%s reliable_side=%s reason=%r %s_volume=%s %s_volume=%s ratio=%s using_bbox_from=%s_seg applying_to=%s_image initial_reference_bbox=%s", case_id, row_index, frame, organ, mode, reference_name, target_name, f"{reference_name} mask invalid or much smaller", reference_name, rv, target_name, tv, ratio, target_name, reference_name, fallback_bbox)
+    elif status == f"{target_name}_unreliable":
+        fallback_bbox = _clamp_bbox_to_shape(reference_bbox, target_image_shape)
+        if result["reference_bbox"] is None or fallback_bbox is None:
+            result.update(valid=False, skip_reason="fallback_bbox_invalid")
+            return result
+        reason = f"{target_name} mask invalid or much smaller; using {reference_name} bbox as {target_name} initial bbox"
+        result.update(target_bbox=fallback_bbox, fallback_used=True, fallback_side="target", fallback_reason=reason)
+        LOGGER.warning("[MOTION BBOX FALLBACK] case=%s row=%s frame=%s organ=%s mode=%s unreliable_side=%s reliable_side=%s reason=%r %s_volume=%s %s_volume=%s ratio=%s using_bbox_from=%s_seg applying_to=%s_image initial_target_bbox=%s", case_id, row_index, frame, organ, mode, target_name, reference_name, f"{target_name} mask invalid or much smaller", reference_name, rv, target_name, tv, ratio, reference_name, target_name, fallback_bbox)
+    if result["reference_bbox"] is None or result["target_bbox"] is None:
+        result.update(valid=False, skip_reason="bbox_invalid_after_clamp")
+    return result
+
 def pearson_safe(pred, gt) -> float:
     """Pearson correlation with finite filtering and constant-vector handling."""
     p = np.asarray(pred, dtype=float); g = np.asarray(gt, dtype=float); m = np.isfinite(p) & np.isfinite(g); p = p[m]; g = g[m]
@@ -194,7 +257,7 @@ def compute_case_motion_metrics(frame_df: pd.DataFrame) -> pd.DataFrame:
         outs.append(out)
     return pd.DataFrame(outs)
 
-def compute_organ_ncc_moves(fixed, moving, warped, fixed_seg, moving_seg, warped_seg, label_map: dict[int, str], affine: np.ndarray, case_id: str, frame: int, organs: list[str] | None = None, row_index=None, device="cpu", ncc_batch_size: int = 64) -> dict[str, float]:
+def compute_organ_ncc_moves(fixed, moving, warped, fixed_seg, moving_seg, warped_seg, label_map: dict[int, str], affine: np.ndarray, case_id: str, frame: int, organs: list[str] | None = None, row_index=None, device="cpu", ncc_batch_size: int = 64, min_mask_volume_voxels: int = 20, severe_volume_ratio_threshold: float = 0.20) -> dict[str, float]:
     """Compute NCCMove=moving->warped and NCCMoveGT=moving->fixed for requested organs."""
     out: dict[str, float] = {}; organs = organs or ["liver", "spleen", "pancreas", "kidney_left", "kidney_right"]
     inv = {v: k for k, v in label_map.items()}
@@ -203,20 +266,36 @@ def compute_organ_ncc_moves(fixed, moving, warped, fixed_seg, moving_seg, warped
         labels = [int(x) for x in labels if x is not None]
         LOGGER.info("[BOUND] case=%s, frame=%s, organ=%s labels=%s", case_id, frame, organ, labels)
         if not labels: continue
-        mb = largest_component_bbox(np.isin(moving_seg, labels), case_id, frame, organ)
-        fb = largest_component_bbox(np.isin(fixed_seg, labels), case_id, frame, organ)
-        wb = largest_component_bbox(np.isin(warped_seg, labels), case_id, frame, organ)
-        if mb is None or fb is None or wb is None:
-            out[f"{organ}NCCMove_status"] = "organ_mask_empty"; continue
-        LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=NCCMove mode=moving-to-warped device=%s bbox_moving=%s bbox_warped=%s", case_id, row_index, frame, organ, labels, device_name(device), mb, wb)
-        pred = match_ncc(moving, mb, warped, wb, affine, case_id, frame, organ, "pred", row_index=row_index, device=device, ncc_batch_size=ncc_batch_size)
-        LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=NCCMoveGT mode=moving-to-fixed device=%s bbox_moving=%s bbox_fixed=%s", case_id, row_index, frame, organ, labels, device_name(device), mb, fb)
-        gt = match_ncc(moving, mb, fixed, fb, affine, case_id, frame, organ, "gt", row_index=row_index, device=device, ncc_batch_size=ncc_batch_size)
-        mc = bbox_center(mb)
-        if pred is not None:
+        moving_mask = np.isin(moving_seg, labels); fixed_mask = np.isin(fixed_seg, labels); warped_mask = np.isin(warped_seg, labels)
+        mb = largest_component_bbox(moving_mask, case_id, frame, organ)
+        fb = largest_component_bbox(fixed_mask, case_id, frame, organ)
+        wb = largest_component_bbox(warped_mask, case_id, frame, organ)
+        pred_choice = choose_bboxes_with_volume_fallback(moving_mask, warped_mask, mb, wb, "moving", "warped", organ, case_id, frame, row_index, moving.shape, warped.shape, affine, affine, "pred", min_mask_volume_voxels, severe_volume_ratio_threshold)
+        out[f"{organ}NCCMoveFallbackUsed"] = pred_choice["fallback_used"]; out[f"{organ}NCCMoveFallbackReason"] = pred_choice["fallback_reason"] or pred_choice["skip_reason"]; out[f"{organ}NCCMoveReferenceMaskVolume"] = pred_choice["reference_volume"]; out[f"{organ}NCCMoveTargetMaskVolume"] = pred_choice["target_volume"]; out[f"{organ}NCCMoveMaskVolumeRatio"] = pred_choice["volume_ratio"]
+        pred = None
+        if pred_choice["valid"]:
+            LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=NCCMove mode=moving-to-warped device=%s bbox_moving=%s bbox_warped=%s", case_id, row_index, frame, organ, labels, device_name(device), pred_choice["reference_bbox"], pred_choice["target_bbox"])
+            pred = match_ncc(moving, pred_choice["reference_bbox"], warped, pred_choice["target_bbox"], affine, case_id, frame, organ, "pred", row_index=row_index, device=device, ncc_batch_size=ncc_batch_size)
+        else:
+            for d in DIRECTIONS: out[f"{organ}NCCMove_{d}"] = float("nan")
+        gt_choice = choose_bboxes_with_volume_fallback(moving_mask, fixed_mask, mb, fb, "moving", "fixed", organ, case_id, frame, row_index, moving.shape, fixed.shape, affine, affine, "gt", min_mask_volume_voxels, severe_volume_ratio_threshold)
+        out[f"{organ}NCCMoveGTFallbackUsed"] = gt_choice["fallback_used"]; out[f"{organ}NCCMoveGTFallbackReason"] = gt_choice["fallback_reason"] or gt_choice["skip_reason"]; out[f"{organ}NCCMoveGTReferenceMaskVolume"] = gt_choice["reference_volume"]; out[f"{organ}NCCMoveGTTargetMaskVolume"] = gt_choice["target_volume"]; out[f"{organ}NCCMoveGTMaskVolumeRatio"] = gt_choice["volume_ratio"]
+        gt = None
+        if gt_choice["valid"]:
+            LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=NCCMoveGT mode=moving-to-fixed device=%s bbox_moving=%s bbox_fixed=%s", case_id, row_index, frame, organ, labels, device_name(device), gt_choice["reference_bbox"], gt_choice["target_bbox"])
+            gt = match_ncc(moving, gt_choice["reference_bbox"], fixed, gt_choice["target_bbox"], affine, case_id, frame, organ, "gt", row_index=row_index, device=device, ncc_batch_size=ncc_batch_size)
+        else:
+            for d in DIRECTIONS: out[f"{organ}NCCMoveGT_{d}"] = float("nan")
+        mc = bbox_center(pred_choice["reference_bbox"] or mb) if (pred_choice["reference_bbox"] or mb) is not None else None
+        if pred is not None and mc is not None:
             disp = convert_voxel_shift_to_physical_ap_rl_si(bbox_center(pred) - mc, affine)
             for d in DIRECTIONS: out[f"{organ}NCCMove_{d}"] = disp[d]
-        if gt is not None:
-            disp = convert_voxel_shift_to_physical_ap_rl_si(bbox_center(gt) - mc, affine)
+        elif pred is None:
+            for d in DIRECTIONS: out.setdefault(f"{organ}NCCMove_{d}", float("nan"))
+        gt_mc = bbox_center(gt_choice["reference_bbox"] or mb) if (gt_choice["reference_bbox"] or mb) is not None else None
+        if gt is not None and gt_mc is not None:
+            disp = convert_voxel_shift_to_physical_ap_rl_si(bbox_center(gt) - gt_mc, affine)
             for d in DIRECTIONS: out[f"{organ}NCCMoveGT_{d}"] = disp[d]
+        elif gt is None:
+            for d in DIRECTIONS: out.setdefault(f"{organ}NCCMoveGT_{d}", float("nan"))
     return out

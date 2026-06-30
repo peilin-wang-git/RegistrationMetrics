@@ -35,3 +35,6 @@ seg_mean_organs:
   - duodenum
   - small_bowel
   - colon
+
+min_mask_volume_voxels: 20
+severe_volume_ratio_threshold: 0.20

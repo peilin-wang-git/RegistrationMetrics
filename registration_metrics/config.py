@@ -28,6 +28,8 @@ MOTION_ORGANS = ["liver", "spleen", "pancreas", "kidney_left", "kidney_right", "
 SEG_METRIC_ORGANS = ["heart", "liver", "spleen", "pancreas", "kidney_left", "kidney_right", "stomach", "aorta", "inferior_vena_cava"]
 SEG_MEAN_ORGANS = ["heart", "liver", "spleen", "pancreas", "kidney_left", "kidney_right", "stomach", "gallbladder", "aorta", "inferior_vena_cava", "portal_vein_and_splenic_vein", "duodenum", "small_bowel", "colon"]
 DIRECTIONS = ["AP", "RL", "SI"]
+DEFAULT_MIN_MASK_VOLUME_VOXELS = 20
+DEFAULT_SEVERE_VOLUME_RATIO_THRESHOLD = 0.20
 REQUIRED_OUTPUT_COLUMNS = ["case_id", "fixed_img_path", "moving_img_path", "warped_img_path", "fixed_seg_path", "moving_seg_path", "warped_seg_path", "transform_path", "Method", "Center", "Modality", "Task", "Organ", "AnalysisGroup", "Frame", "status", "error_message", "skip_reason", "runtime_seconds"]
 
 
@@ -51,7 +53,7 @@ def load_config(path: str | Path) -> dict[str, dict[str, dict[str, Any]]]:
         raise ValueError("[CONFIG] config must be a dictionary of methods and groups")
     if "CONFIG" in cfg and isinstance(cfg["CONFIG"], dict):
         loaded = dict(cfg["CONFIG"])
-        for special_key in ["label_map", "seg_metric_organs", "seg_mean_organs"]:
+        for special_key in ["label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold"]:
             if special_key in cfg:
                 loaded[special_key] = cfg[special_key]
         return loaded
@@ -93,3 +95,11 @@ def resolve_seg_mean_organs(config: dict[str, Any] | None = None, cli_organs: st
             return [x.strip() for x in cfg_organs.split(",") if x.strip()]
         return [str(x).strip() for x in cfg_organs if str(x).strip()]
     return list(SEG_MEAN_ORGANS)
+
+
+def resolve_mask_quality_thresholds(config: dict[str, Any] | None = None, min_mask_volume_voxels: int | None = None, severe_volume_ratio_threshold: float | None = None) -> tuple[int, float]:
+    """Resolve mask quality thresholds from CLI, config, or defaults."""
+    cfg = config or {}
+    min_volume = min_mask_volume_voxels if min_mask_volume_voxels is not None else cfg.get("min_mask_volume_voxels", DEFAULT_MIN_MASK_VOLUME_VOXELS)
+    ratio = severe_volume_ratio_threshold if severe_volume_ratio_threshold is not None else cfg.get("severe_volume_ratio_threshold", DEFAULT_SEVERE_VOLUME_RATIO_THRESHOLD)
+    return int(min_volume), float(ratio)

@@ -73,7 +73,7 @@ def pair_metrics(a: np.ndarray, b: np.ndarray, spacing: tuple[float, float, floa
     return {"dice": dice_coefficient(a, b, device=device), "iou": iou_score(a, b, device=device), "hd95": hd95(a, b, spacing), "assd": assd(a, b, spacing)}
 
 
-def compute_segmentation_metrics(fixed_seg: np.ndarray, moving_seg: np.ndarray, warped_seg: np.ndarray, label_map: dict[int, str], spacing: tuple[float, float, float], case_id: str, frame: int, row_index=None, device="cpu", seg_metric_organs: list[str] | None = None, seg_mean_organs: list[str] | None = None, verbose_seg_mean: bool = False) -> dict[str, float]:
+def compute_segmentation_metrics(fixed_seg: np.ndarray, moving_seg: np.ndarray, warped_seg: np.ndarray, label_map: dict[int, str], spacing: tuple[float, float, float], case_id: str, frame: int, row_index=None, device="cpu", seg_metric_organs: list[str] | None = None, seg_mean_organs: list[str] | None = None, verbose_seg_mean: bool = False, min_mask_volume_voxels: int = 20) -> dict[str, float]:
     """Compute selected per-organ segmentation metrics plus all-foreground-label mean metrics."""
     out: dict[str, float] = {}
     selected = set(seg_metric_organs or SEG_METRIC_ORGANS)
@@ -102,7 +102,13 @@ def compute_segmentation_metrics(fixed_seg: np.ndarray, moving_seg: np.ndarray, 
             if str(device) != "cpu" and output_individual:
                 LOGGER.info("[GPU] metric=Dice organ=%s device=%s voxels_fixed=%s voxels_warped=%s", organ, device_name(device), int(fm.sum()), int(mask.sum()))
                 LOGGER.info("[GPU] metric=HD95 organ=%s device=cpu reason=scipy_distance_transform", organ)
-            res = pair_metrics(fm, mask, spacing, device=device)
+            fixed_volume = int(fm.sum()); target_volume = int(mask.sum())
+            if fixed_volume < min_mask_volume_voxels or target_volume < min_mask_volume_voxels:
+                target_name = pair_label.split("-")[0]
+                LOGGER.info("[SEG SKIP] case=%s row=%s frame=%s organ=%s label=%s pair=%s reason=fixed_or_%s_mask_empty_or_too_small fixed_volume=%s %s_volume=%s metrics_set_to_nan=True", case_id, row_index, frame, organ, label, pair_label, target_name, fixed_volume, target_name, target_volume)
+                res = {"dice": float("nan"), "iou": float("nan"), "hd95": float("nan"), "assd": float("nan")}
+            else:
+                res = pair_metrics(fm, mask, spacing, device=device)
             for metric, val in res.items():
                 if use_for_mean:
                     mean_values[(metric, suffix)].append(val)

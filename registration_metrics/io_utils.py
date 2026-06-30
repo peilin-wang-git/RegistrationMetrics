@@ -4,7 +4,7 @@ import logging, time, traceback
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from .config import REQUIRED_OUTPUT_COLUMNS, merged_label_map, resolve_seg_metric_organs, resolve_seg_mean_organs
+from .config import REQUIRED_OUTPUT_COLUMNS, merged_label_map, resolve_seg_metric_organs, resolve_seg_mean_organs, resolve_mask_quality_thresholds
 from .orientation_utils import load_nifti, get_spacing_from_affine, get_axis_code_mapping
 from .image_metrics import compute_global_metrics
 from .seg_metrics import compute_segmentation_metrics
@@ -54,14 +54,15 @@ def _frame(data: np.ndarray, idx: int) -> np.ndarray:
     """Return 3D frame; 3D arrays are reused for all frames."""
     return data if data.ndim == 3 else data[..., idx]
 
-def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, enable_seg=True, enable_dvf=True, enable_motion=True, enable_vertebra=True, use_gpu: bool = False, requested_device: str = "cuda:0", gpu_metrics: str = "all", ncc_batch_size: int = 64, seg_metric_organs: str | list[str] | None = None, seg_mean_organs: str | list[str] | None = None, verbose_seg_mean: bool = False) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, enable_seg=True, enable_dvf=True, enable_motion=True, enable_vertebra=True, use_gpu: bool = False, requested_device: str = "cuda:0", gpu_metrics: str = "all", ncc_batch_size: int = 64, seg_metric_organs: str | list[str] | None = None, seg_mean_organs: str | list[str] | None = None, verbose_seg_mean: bool = False, min_mask_volume_voxels: int | None = None, severe_volume_ratio_threshold: float | None = None) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
     """Compute metrics for all configured method/group CSV files with case-level error isolation."""
-    outdir=Path(output_dir); outdir.mkdir(parents=True, exist_ok=True); labels=merged_label_map(config); selected_seg_organs=resolve_seg_metric_organs(config, seg_metric_organs); selected_seg_mean_organs=resolve_seg_mean_organs(config, seg_mean_organs); all_rows=[]; errors=[]; device=get_device(use_gpu, requested_device); progress_path=outdir/"detailed_progress.csv"; error_path=outdir/"error_log.csv"
+    outdir=Path(output_dir); outdir.mkdir(parents=True, exist_ok=True); labels=merged_label_map(config); selected_seg_organs=resolve_seg_metric_organs(config, seg_metric_organs); selected_seg_mean_organs=resolve_seg_mean_organs(config, seg_mean_organs); min_mask_volume_voxels, severe_volume_ratio_threshold = resolve_mask_quality_thresholds(config, min_mask_volume_voxels, severe_volume_ratio_threshold); all_rows=[]; errors=[]; device=get_device(use_gpu, requested_device); progress_path=outdir/"detailed_progress.csv"; error_path=outdir/"error_log.csv"
     LOGGER.info("[CONFIG] methods=%s output_dir=%s", list(config.keys()), outdir)
     LOGGER.info("[SEG METRIC] selected individual organ metrics organs=%s", selected_seg_organs)
     LOGGER.info("[SEG METRIC] mean organ set organs=%s", selected_seg_mean_organs)
+    LOGGER.info("[MOTION MASK CHECK] min_mask_volume_voxels=%s severe_volume_ratio_threshold=%s", min_mask_volume_voxels, severe_volume_ratio_threshold)
     for method, groups in config.items():
-      if method in {"label_map", "seg_metric_organs", "seg_mean_organs"}: continue
+      if method in {"label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold"}: continue
       for analysis_group, g in groups.items():
         LOGGER.info("[GROUP START] input_csv=%s method=%s group=%s center=%s modality=%s task=%s organ=%s device=%s", g.get("csv_path"), method, analysis_group, g.get('center'), g.get('modality'), g.get('task'), g.get('organ'), device_name(device))
         df=normalize_columns(pd.read_csv(g["csv_path"])); group_rows=[]
@@ -88,8 +89,8 @@ def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, 
               if fixed.shape != moving.shape or fixed.shape != warped.shape: row.update(status="skipped", skip_reason="shape_mismatch")
               else:
                 if enable_global: row.update(compute_global_metrics(fixed,moving,warped,case,frame,row_index=row_index,device=device))
-                if enable_seg: row.update(compute_segmentation_metrics(fseg,mseg,wseg,labels,spacing,case,frame,row_index=row_index,device=device,seg_metric_organs=selected_seg_organs,seg_mean_organs=selected_seg_mean_organs,verbose_seg_mean=verbose_seg_mean))
-                if enable_motion: row.update(compute_organ_ncc_moves(fixed,moving,warped,fseg,mseg,wseg,labels,imgs["fixed_img_path"].affine,case,frame,row_index=row_index,device=device,ncc_batch_size=ncc_batch_size))
+                if enable_seg: row.update(compute_segmentation_metrics(fseg,mseg,wseg,labels,spacing,case,frame,row_index=row_index,device=device,seg_metric_organs=selected_seg_organs,seg_mean_organs=selected_seg_mean_organs,verbose_seg_mean=verbose_seg_mean,min_mask_volume_voxels=min_mask_volume_voxels))
+                if enable_motion: row.update(compute_organ_ncc_moves(fixed,moving,warped,fseg,mseg,wseg,labels,imgs["fixed_img_path"].affine,case,frame,row_index=row_index,device=device,ncc_batch_size=ncc_batch_size,min_mask_volume_voxels=min_mask_volume_voxels,severe_volume_ratio_threshold=severe_volume_ratio_threshold))
                 if enable_vertebra: row.update(compute_vertebra_ncc(fixed,moving,warped,fseg,mseg,wseg,case,frame,row_index=row_index,device=device))
               row["runtime_seconds"]=time.time()-t0; all_rows.append(row); group_rows.append(row); row_results.append(row)
             if enable_dvf and pd.notna(r.get("transform_path")): row_results[-1].update(compute_dvf_metrics(r["transform_path"], case, row_index=row_index, device=device)); all_rows[-1].update(row_results[-1])
