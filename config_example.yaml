@@ -1,0 +1,37 @@
+CONFIG:
+  DDEM:
+    "Institution A | Liver | T1w-4D":
+      center: "Institution A"
+      modality: "T1w-4D"
+      task: "T1w-4D"
+      organ: "liver"
+      csv_path: "/path/to/result.csv"
+      output_dir: "./metrics_out"
+label_map:
+  51: "clavicula_right"
+
+seg_metric_organs:
+  - heart
+  - liver
+  - spleen
+  - pancreas
+  - kidney_left
+  - kidney_right
+  - stomach
+  - aorta
+  - inferior_vena_cava
+seg_mean_organs:
+  - heart
+  - liver
+  - spleen
+  - pancreas
+  - kidney_left
+  - kidney_right
+  - stomach
+  - gallbladder
+  - aorta
+  - inferior_vena_cava
+  - portal_vein_and_splenic_vein
+  - duodenum
+  - small_bowel
+  - colon
