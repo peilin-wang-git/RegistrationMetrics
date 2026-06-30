@@ -8,6 +8,7 @@ from skimage.measure import label as cc_label
 from .config import DIRECTIONS
 from .image_metrics import normalized_cross_correlation_similarity
 from .orientation_utils import convert_voxel_shift_to_physical_ap_rl_si
+from .gpu_utils import torch, to_tensor_np, device_name
 
 LOGGER = logging.getLogger("registration_metrics")
 BBox = tuple[int, int, int, int, int, int]
@@ -74,11 +75,11 @@ def _shift(b: BBox, ax: int, step: int) -> BBox:
     x = list(b); x[2*ax] += step; x[2*ax+1] += step; return tuple(x)
 
 
-def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: np.ndarray, target_bound: BBox, affine: np.ndarray, case_id: str, frame: int, organ: str, mode: str, block: int = 5, length: int = 24, max_iter: int = 20) -> BBox | None:
+def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: np.ndarray, target_bound: BBox, affine: np.ndarray, case_id: str, frame: int, organ: str, mode: str, block: int = 5, length: int = 24, max_iter: int = 20, row_index=None, device="cpu", ncc_batch_size: int = 64) -> BBox | None:
     """Iteratively match target ROI to reference ROI by positive NCC, selecting argmax candidates."""
     half = length // 2
     LOGGER.info("[MATCH_NCC START] case=%s, frame=%s, organ=%s, mode=%s", case_id, frame, organ, mode)
-    LOGGER.info("[MATCH_NCC PARAM] block=%s, length=%s, half_length=%s, max_iter=%s", block, length, half, max_iter)
+    LOGGER.info("[MATCH_NCC PARAM] block=%s, length=%s, half_length=%s, max_iter=%s, ncc_batch_size=%s, device=%s", block, length, half, max_iter, ncc_batch_size, device_name(device))
     LOGGER.info("[MATCH_NCC INPUT] ref image shape=%s, target image shape=%s", reference_image.shape, target_image.shape)
     LOGGER.info("[MATCH_NCC INPUT] ref bbox=%s, target bbox=%s", reference_bound, target_bound)
     rb, tb = equal_range(reference_bound, target_bound, reference_image.shape[:3])
@@ -90,10 +91,33 @@ def match_ncc(reference_image: np.ndarray, reference_bound: BBox, target_image: 
     for it in range(max_iter):
         LOGGER.info("[MATCH_NCC ITER] iter=%s", it); LOGGER.info("[MATCH_NCC ITER] current target bbox=%s", tmp)
         scores = []
+        candidates = []
         for ax in range(3):
             for step in range(-half, half + 1):
                 cand = _shift(tmp, ax, step); roi = _crop(target_image, cand, adjusted); valid = roi is not None and roi.shape == ref_roi.shape
-                ncc = normalized_cross_correlation_similarity(ref_roi, roi) if valid else float("nan")
+                candidates.append((ax, step, valid, roi))
+        for start in range(0, len(candidates), ncc_batch_size):
+            batch = candidates[start:start+ncc_batch_size]
+            LOGGER.info("[GPU] metric=NCCMove organ=%s candidate_batch=%s batch_size=%s device=%s", organ, start // ncc_batch_size, len(batch), device_name(device))
+            valid_rois = [x[3] for x in batch if x[2]]
+            batch_scores = []
+            if valid_rois and torch is not None and str(device) != "cpu":
+                try:
+                    ref_t = to_tensor_np(np.stack([ref_roi] * len(valid_rois)), device)
+                    tgt_t = to_tensor_np(np.stack(valid_rois), device)
+                    rf = ref_t.reshape(len(valid_rois), -1); tf = tgt_t.reshape(len(valid_rois), -1)
+                    rf = rf - rf.mean(dim=1, keepdim=True); tf = tf - tf.mean(dim=1, keepdim=True)
+                    denom = torch.std(rf, dim=1, unbiased=False) * torch.std(tf, dim=1, unbiased=False)
+                    vals = torch.mean(rf * tf, dim=1) / denom
+                    batch_scores = [float(v.detach().cpu()) if bool(torch.isfinite(v)) and float(d.detach().cpu()) >= 1e-12 else float("nan") for v, d in zip(vals, denom)]
+                except RuntimeError as e:
+                    LOGGER.warning("[GPU FALLBACK] metric=NCCMove case_id=%s reason=%s", case_id, e)
+                    batch_scores = [normalized_cross_correlation_similarity(ref_roi, roi, metric_name="NCCMove", pair=mode, case_id=case_id) for roi in valid_rois]
+            else:
+                batch_scores = [normalized_cross_correlation_similarity(ref_roi, roi, metric_name="NCCMove", pair=mode, case_id=case_id) for roi in valid_rois]
+            vi = iter(batch_scores)
+            for ax, step, valid, roi in batch:
+                ncc = next(vi) if valid else float("nan")
                 scores.append(ncc); LOGGER.debug("[MATCH_NCC CAND] axis=axis%s, step=%s, valid=%s, ncc=%s", ax, step, valid, ncc)
         if not np.isfinite(scores).any(): LOGGER.info("[MATCH_NCC END] all candidate NCC are nan"); return None
         collect_ncc.append(scores); arr = np.asarray(scores, dtype=float)
@@ -170,7 +194,7 @@ def compute_case_motion_metrics(frame_df: pd.DataFrame) -> pd.DataFrame:
         outs.append(out)
     return pd.DataFrame(outs)
 
-def compute_organ_ncc_moves(fixed, moving, warped, fixed_seg, moving_seg, warped_seg, label_map: dict[int, str], affine: np.ndarray, case_id: str, frame: int, organs: list[str] | None = None) -> dict[str, float]:
+def compute_organ_ncc_moves(fixed, moving, warped, fixed_seg, moving_seg, warped_seg, label_map: dict[int, str], affine: np.ndarray, case_id: str, frame: int, organs: list[str] | None = None, row_index=None, device="cpu", ncc_batch_size: int = 64) -> dict[str, float]:
     """Compute NCCMove=moving->warped and NCCMoveGT=moving->fixed for requested organs."""
     out: dict[str, float] = {}; organs = organs or ["liver", "spleen", "pancreas", "kidney_left", "kidney_right"]
     inv = {v: k for k, v in label_map.items()}
@@ -184,8 +208,10 @@ def compute_organ_ncc_moves(fixed, moving, warped, fixed_seg, moving_seg, warped
         wb = largest_component_bbox(np.isin(warped_seg, labels), case_id, frame, organ)
         if mb is None or fb is None or wb is None:
             out[f"{organ}NCCMove_status"] = "organ_mask_empty"; continue
-        pred = match_ncc(moving, mb, warped, wb, affine, case_id, frame, organ, "pred")
-        gt = match_ncc(moving, mb, fixed, fb, affine, case_id, frame, organ, "gt")
+        LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=NCCMove mode=moving-to-warped device=%s bbox_moving=%s bbox_warped=%s", case_id, row_index, frame, organ, labels, device_name(device), mb, wb)
+        pred = match_ncc(moving, mb, warped, wb, affine, case_id, frame, organ, "pred", row_index=row_index, device=device, ncc_batch_size=ncc_batch_size)
+        LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=NCCMoveGT mode=moving-to-fixed device=%s bbox_moving=%s bbox_fixed=%s", case_id, row_index, frame, organ, labels, device_name(device), mb, fb)
+        gt = match_ncc(moving, mb, fixed, fb, affine, case_id, frame, organ, "gt", row_index=row_index, device=device, ncc_batch_size=ncc_batch_size)
         mc = bbox_center(mb)
         if pred is not None:
             disp = convert_voxel_shift_to_physical_ap_rl_si(bbox_center(pred) - mc, affine)

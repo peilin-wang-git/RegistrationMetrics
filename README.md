@@ -86,3 +86,28 @@ python -m registration_metrics.cli all \
 ## 日志
 
 项目使用 `logging` 输出非常详细的过程信息。console 输出 INFO，文件保存 DEBUG，日志文件名为 `metrics_run_YYYYMMDD_HHMMSS.log`。日志前缀包括：`[CONFIG]`、`[GROUP START]`、`[CASE START]`、`[LOAD]`、`[ORIENTATION]`、`[FRAME]`、`[GLOBAL]`、`[SEG]`、`[BOUND]`、`[EQUAL_RANGE]`、`[MATCH_NCC]`、`[MOTION FRAME]`、`[MOTION CASE]`、`[VERTEBRA]`、`[DVF]`、`[SAVE]`、`[ERROR]`、`[SUMMARY]`。
+
+## Incremental saving and summary
+
+During `compute`/`all`, results are appended to `detailed_progress.csv` after each input CSV row finishes. Failures are appended to `error_log.csv` immediately. After processing completes, the program reloads `detailed_progress.csv` from disk and writes `summary_by_group.csv` and `summary_overall.csv`. Variance in summaries uses pandas `var` default `ddof=1`.
+
+## GPU acceleration
+
+CPU remains the default. Optional GPU acceleration can be requested with:
+
+```bash
+python -m registration_metrics.cli compute \
+  --config config.yaml \
+  --output-dir ./metrics_out \
+  --enable-global \
+  --enable-seg \
+  --enable-dvf \
+  --enable-motion \
+  --enable-vertebra \
+  --use-gpu \
+  --device cuda:0 \
+  --gpu-metrics all \
+  --ncc-batch-size 64
+```
+
+Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, and organ NCCMove/NCCMoveGT candidate NCC batches. NMI and SSIM remain CPU because the current implementations use numpy histogram and skimage. HD95/ASSD remain CPU because the distance transform uses scipy. If CUDA or a GPU metric fails, the code logs `[GPU FALLBACK]` and retries CPU for that metric.
