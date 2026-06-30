@@ -111,3 +111,27 @@ python -m registration_metrics.cli compute \
 ```
 
 Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, and organ NCCMove/NCCMoveGT candidate NCC batches. NMI and SSIM remain CPU because the current implementations use numpy histogram and skimage. HD95/ASSD remain CPU because the distance transform uses scipy. If CUDA or a GPU metric fails, the code logs `[GPU FALLBACK]` and retries CPU for that metric.
+
+## Segmentation organ metric scope
+
+To reduce runtime and CSV width, individual Dice/IoU/HD95/ASSD columns are emitted only for selected abdominal organs by default:
+
+```yaml
+seg_metric_organs:
+  - liver
+  - spleen
+  - pancreas
+  - kidney_left
+  - kidney_right
+  - stomach
+  - gallbladder
+  - aorta
+  - inferior_vena_cava
+  - portal_vein_and_splenic_vein
+  - small_bowel
+  - colon
+  - duodenum
+  - urinary_bladder
+```
+
+All foreground labels in the label map still participate in `mean_dice_all_organs_*`, `mean_iou_all_organs_*`, `mean_hd95_all_organs_*`, and `mean_assd_all_organs_*` columns. Non-selected organs no longer emit individual segmentation metric columns. Override the selected organs with `seg_metric_organs` in YAML or `--seg-metric-organs liver,spleen,...`; pass `--verbose-seg-mean` to debug-log every label that contributes to all-organ means.

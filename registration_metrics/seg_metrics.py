@@ -5,6 +5,7 @@ import logging
 import numpy as np
 from scipy.ndimage import binary_erosion, distance_transform_edt
 from .gpu_utils import torch, to_tensor_np, device_name
+from .config import SEG_METRIC_ORGANS
 
 LOGGER = logging.getLogger("registration_metrics")
 
@@ -72,27 +73,45 @@ def pair_metrics(a: np.ndarray, b: np.ndarray, spacing: tuple[float, float, floa
     return {"dice": dice_coefficient(a, b, device=device), "iou": iou_score(a, b, device=device), "hd95": hd95(a, b, spacing), "assd": assd(a, b, spacing)}
 
 
-def compute_segmentation_metrics(fixed_seg: np.ndarray, moving_seg: np.ndarray, warped_seg: np.ndarray, label_map: dict[int, str], spacing: tuple[float, float, float], case_id: str, frame: int, row_index=None, device="cpu") -> dict[str, float]:
-    """Compute foreground and per-label segmentation metrics with verbose logs."""
+def compute_segmentation_metrics(fixed_seg: np.ndarray, moving_seg: np.ndarray, warped_seg: np.ndarray, label_map: dict[int, str], spacing: tuple[float, float, float], case_id: str, frame: int, row_index=None, device="cpu", seg_metric_organs: list[str] | None = None, verbose_seg_mean: bool = False) -> dict[str, float]:
+    """Compute selected per-organ segmentation metrics plus all-foreground-label mean metrics."""
     out: dict[str, float] = {}
-    items = [(-1, "foreground")]+[(k, v) for k, v in label_map.items() if k != 0]
-    for label, organ in items:
-        fm = fixed_seg > 0 if label == -1 else fixed_seg == label
-        mm = moving_seg > 0 if label == -1 else moving_seg == label
-        wm = warped_seg > 0 if label == -1 else warped_seg == label
+    selected = set(seg_metric_organs or SEG_METRIC_ORGANS)
+    selected_items = [(k, v) for k, v in label_map.items() if k != 0 and v in selected]
+    all_items = [(k, v) for k, v in label_map.items() if k != 0]
+    mean_values: dict[tuple[str, str], list[float]] = {(metric, suffix): [] for metric in ["dice", "iou", "hd95", "assd"] for suffix in ["moving_fixed", "warped_fixed"]}
+    LOGGER.info("[SEG METRIC] selected organ metrics labels=%s", [organ for _, organ in selected_items])
+    LOGGER.info("[SEG METRIC] all foreground labels will be used for mean metrics, n_labels=%s", len(all_items))
+    for label, organ in all_items:
+        output_individual = organ in selected
+        fm = fixed_seg == label
+        mm = moving_seg == label
+        wm = warped_seg == label
         LOGGER.info("[SEG] case=%s, frame=%s, organ=%s, label=%s", case_id, frame, organ, label)
         LOGGER.info("[SEG] fixed voxels=%s, moving voxels=%s, warped voxels=%s", int(fm.sum()), int(mm.sum()), int(wm.sum()))
         for suffix, mask in [("moving_fixed", mm), ("warped_fixed", wm)]:
             pair_label = suffix.replace("_", "-")
-            if str(device) != "cpu":
+            if str(device) != "cpu" and output_individual:
                 LOGGER.info("[GPU] metric=Dice organ=%s device=%s voxels_fixed=%s voxels_warped=%s", organ, device_name(device), int(fm.sum()), int(mask.sum()))
                 LOGGER.info("[GPU] metric=HD95 organ=%s device=cpu reason=scipy_distance_transform", organ)
-            for metric in ["Dice", "IoU", "HD95", "ASSD"]:
-                LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=%s pair=%s device=%s fixed_voxels=%s target_voxels=%s spacing=%s", case_id, row_index, frame, organ, label, metric, pair_label, device_name(device) if metric in ["Dice", "IoU"] else "cpu", int(fm.sum()), int(mask.sum()), spacing)
-                if metric in ["HD95", "ASSD"] and (int(fm.sum()) == 0 or int(mask.sum()) == 0) and not (int(fm.sum()) == 0 and int(mask.sum()) == 0):
-                    LOGGER.info("[SKIP] case_id=%s row=%s frame=%s organ=%s metric=%s reason=%s mask empty", case_id, row_index, frame, organ, metric, "fixed" if int(fm.sum()) == 0 else "target")
             res = pair_metrics(fm, mask, spacing, device=device)
-            for metric, val in res.items(): out[f"{metric}_{organ}_{suffix}"] = val
-        LOGGER.info("[SEG] moving-fixed dice=%s, iou=%s, hd95=%s, assd=%s", out[f"dice_{organ}_moving_fixed"], out[f"iou_{organ}_moving_fixed"], out[f"hd95_{organ}_moving_fixed"], out[f"assd_{organ}_moving_fixed"])
-        LOGGER.info("[SEG] warped-fixed dice=%s, iou=%s, hd95=%s, assd=%s", out[f"dice_{organ}_warped_fixed"], out[f"iou_{organ}_warped_fixed"], out[f"hd95_{organ}_warped_fixed"], out[f"assd_{organ}_warped_fixed"])
+            for metric, val in res.items():
+                mean_values[(metric, suffix)].append(val)
+                metric_name = metric.upper() if metric in ["hd95", "assd"] else metric.capitalize()
+                if output_individual:
+                    LOGGER.info("[SEG METRIC] case_id=%s row=%s frame=%s organ=%s label=%s output_individual=True metric=%s pair=%s value=%s", case_id, row_index, frame, organ, label, metric_name, pair_label, val)
+                    LOGGER.info("[ORGAN METRIC] case_id=%s row=%s frame=%s organ=%s label=%s metric=%s pair=%s device=%s fixed_voxels=%s target_voxels=%s spacing=%s", case_id, row_index, frame, organ, label, metric_name, pair_label, device_name(device) if metric in ["dice", "iou"] else "cpu", int(fm.sum()), int(mask.sum()), spacing)
+                    out[f"{metric}_{organ}_{suffix}"] = val
+                elif verbose_seg_mean:
+                    LOGGER.debug("[SEG METRIC] case_id=%s row=%s frame=%s organ=%s label=%s output_individual=False use_for_all_organs_mean=True metric=%s pair=%s value=%s", case_id, row_index, frame, organ, label, metric_name, pair_label, val)
+                if metric in ["hd95", "assd"] and (int(fm.sum()) == 0 or int(mask.sum()) == 0) and not (int(fm.sum()) == 0 and int(mask.sum()) == 0):
+                    LOGGER.info("[SKIP] case_id=%s row=%s frame=%s organ=%s metric=%s reason=%s mask empty", case_id, row_index, frame, organ, metric_name, "fixed" if int(fm.sum()) == 0 else "target")
+        if output_individual:
+            LOGGER.info("[SEG] moving-fixed dice=%s, iou=%s, hd95=%s, assd=%s", out[f"dice_{organ}_moving_fixed"], out[f"iou_{organ}_moving_fixed"], out[f"hd95_{organ}_moving_fixed"], out[f"assd_{organ}_moving_fixed"])
+            LOGGER.info("[SEG] warped-fixed dice=%s, iou=%s, hd95=%s, assd=%s", out[f"dice_{organ}_warped_fixed"], out[f"iou_{organ}_warped_fixed"], out[f"hd95_{organ}_warped_fixed"], out[f"assd_{organ}_warped_fixed"])
+    for (metric, suffix), values in mean_values.items():
+        mean_value = float(np.nanmean(values)) if np.isfinite(values).any() else float("nan")
+        column = f"mean_{metric}_all_organs_{suffix}"
+        out[column] = mean_value
+        LOGGER.info("[SEG METRIC] case_id=%s frame=%s %s=%s", case_id, frame, column, mean_value)
     return out

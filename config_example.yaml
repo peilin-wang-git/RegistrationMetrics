@@ -9,3 +9,19 @@ CONFIG:
       output_dir: "./metrics_out"
 label_map:
   51: "clavicula_right"
+
+seg_metric_organs:
+  - liver
+  - spleen
+  - pancreas
+  - kidney_left
+  - kidney_right
+  - stomach
+  - gallbladder
+  - aorta
+  - inferior_vena_cava
+  - portal_vein_and_splenic_vein
+  - small_bowel
+  - colon
+  - duodenum
+  - urinary_bladder
