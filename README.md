@@ -110,7 +110,7 @@ python -m registration_metrics.cli compute \
   --ncc-batch-size 64
 ```
 
-Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, and organ NCCMove/NCCMoveGT candidate NCC batches. Multiprocessing with GPU can increase memory usage; prefer `--num-workers 1` for GPU runs unless memory headroom has been verified. NMI and SSIM remain CPU because the current implementations use numpy/sklearn binning and skimage. HD95/ASSD remain CPU because the distance transform uses scipy. If CUDA or a GPU metric fails, the code logs `[GPU FALLBACK]` and retries CPU for that metric.
+Supported GPU paths include NCC/LCC, MSE, Dice, IoU, DVF Jacobian, VertebraNCC, and organ NCCMove/NCCMoveGT candidate NCC batches. GPU multiprocessing must use Python's `spawn` start method because Linux's default `fork` start method cannot safely re-initialize PyTorch CUDA in subprocesses. When `--use-gpu` and `--num-workers > 1` are set, the process pool is created with a spawn multiprocessing context and logs `[MP GPU] use_gpu=True num_workers=... start_method=spawn`. Multiprocessing with GPU can substantially increase GPU memory usage; for large images, start with `--num-workers 1` and only increase workers after verifying memory headroom. CPU multiprocessing may use multiple workers for throughput. NMI and SSIM remain CPU because the current implementations use numpy/sklearn binning and skimage. HD95/ASSD remain CPU because the distance transform uses scipy. If CUDA or a GPU metric fails, the code logs `[GPU FALLBACK]` and retries CPU for that metric.
 
 ## Dependencies
 

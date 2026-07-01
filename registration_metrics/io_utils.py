@@ -1,6 +1,7 @@
 """CSV normalization and 3D-only compute orchestration helpers."""
 from __future__ import annotations
 import logging, time, traceback
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,7 @@ from .seg_metrics import compute_segmentation_metrics
 from .dvf_metrics import compute_dvf_metrics
 from .vertebra_metrics import compute_vertebra_ncc
 from .motion_metrics import compute_organ_ncc_moves
-from .gpu_utils import get_device, device_name
+from .gpu_utils import get_device
 
 LOGGER=logging.getLogger("registration_metrics")
 METADATA_COLUMNS={"case_id","frame","row_index","Method","Center","Modality","Task","Organ","AnalysisGroup","fixed_img_path","moving_img_path","warped_img_path","fixed_seg_path","moving_seg_path","warped_seg_path","transform_path","status","error_message","skip_reason","completed_at","run_id","runtime_seconds"}
@@ -194,10 +195,27 @@ def _finalize_outputs(tasks: list[CaseTask], all_rows: list[dict], errors: list[
     return combined, pd.DataFrame(), pd.DataFrame()
 
 
+def _process_pool_context(use_gpu: bool, workers: int):
+    """Return a multiprocessing context for process pools without initializing CUDA."""
+    if use_gpu and workers > 1:
+        LOGGER.info("[MP GPU] use_gpu=True num_workers=%s start_method=spawn", workers)
+        LOGGER.warning("[MP GPU WARNING] Multiple GPU workers may increase GPU memory usage. If OOM occurs, use --num-workers 1.")
+        return mp.get_context("spawn")
+    return None
+
+
+def _run_single_process(tasks: list[CaseTask], progress_path: Path, error_path: Path) -> tuple[list[dict], list[dict], int, int]:
+    all_rows=[]; errors=[]; completed=0; failed=0
+    for task in tasks:
+        result=compute_single_case_task(task); completed += 1; failed += 0 if result.get("success") else 1
+        all_rows.extend(result.get("result_rows", [])); errors.extend(result.get("error_rows", [])); append_rows_to_csv(result.get("result_rows", []), progress_path); append_rows_to_csv(result.get("error_rows", []), error_path)
+        LOGGER.info("[MP DONE] row=%s case_id=%s success=%s appended_rows=%s runtime_seconds=%s", result.get("row_index"), result.get("case_id"), result.get("success"), len(result.get("result_rows", [])), result.get("runtime_seconds"))
+    return all_rows, errors, completed, failed
+
+
 def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, enable_seg=True, enable_dvf=True, enable_motion=True, enable_vertebra=True, use_gpu: bool = False, requested_device: str = "cuda:0", gpu_metrics: str = "all", ncc_batch_size: int = 64, seg_metric_organs: str | list[str] | None = None, seg_mean_organs: str | list[str] | None = None, verbose_seg_mean: bool = False, min_mask_volume_voxels: int | None = None, severe_volume_ratio_threshold: float | None = None, num_workers: int = 1) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
     """Compute metrics for configured CSV rows as pre-split 3D cases with optional multiprocessing."""
     outdir=Path(output_dir); outdir.mkdir(parents=True, exist_ok=True); labels=merged_label_map(config); selected_seg_organs=resolve_seg_metric_organs(config, seg_metric_organs); selected_seg_mean_organs=resolve_seg_mean_organs(config, seg_mean_organs); min_mask_volume_voxels, severe_volume_ratio_threshold = resolve_mask_quality_thresholds(config, min_mask_volume_voxels, severe_volume_ratio_threshold); progress_path=outdir/"detailed_progress.csv"; error_path=outdir/"error_log.csv"; nmi_bins=int(config.get("nmi_bins", 64))
-    device=get_device(use_gpu, requested_device)
     LOGGER.info("[CONFIG] methods=%s output_dir=%s", list(config.keys()), outdir)
     LOGGER.info("[SEG METRIC] selected individual organ metrics organs=%s", selected_seg_organs)
     LOGGER.info("[SEG METRIC] mean organ set organs=%s", selected_seg_mean_organs)
@@ -205,29 +223,32 @@ def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, 
     for method, groups in config.items():
         if method in {"label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold", "nmi_bins"}: continue
         for analysis_group, g in groups.items():
-            LOGGER.info("[GROUP START] input_csv=%s method=%s group=%s center=%s modality=%s task=%s organ=%s device=%s", g.get("csv_path"), method, analysis_group, g.get('center'), g.get('modality'), g.get('task'), g.get('organ'), device_name(device))
+            LOGGER.info("[GROUP START] input_csv=%s method=%s group=%s center=%s modality=%s task=%s organ=%s use_gpu=%s requested_device=%s", g.get("csv_path"), method, analysis_group, g.get('center'), g.get('modality'), g.get('task'), g.get('organ'), use_gpu, requested_device)
     tasks=_build_tasks(config,labels,selected_seg_organs,selected_seg_mean_organs,enable_global,enable_seg,enable_dvf,enable_motion,enable_vertebra,use_gpu,requested_device,ncc_batch_size,verbose_seg_mean,min_mask_volume_voxels,severe_volume_ratio_threshold,nmi_bins)
     all_rows=[]; errors=[]; completed=0; failed=0; workers=max(int(num_workers or 1), 1)
     LOGGER.info("[MP START] num_workers=%s", workers)
-    if use_gpu and workers > 1:
-        LOGGER.warning("[MP GPU WARNING] multiprocessing with GPU may increase memory usage")
     if workers <= 1:
-        for task in tasks:
-            result=compute_single_case_task(task); completed += 1; failed += 0 if result.get("success") else 1
-            all_rows.extend(result.get("result_rows", [])); errors.extend(result.get("error_rows", [])); append_rows_to_csv(result.get("result_rows", []), progress_path); append_rows_to_csv(result.get("error_rows", []), error_path)
-            LOGGER.info("[MP DONE] row=%s case_id=%s success=%s appended_rows=%s runtime_seconds=%s", result.get("row_index"), result.get("case_id"), result.get("success"), len(result.get("result_rows", [])), result.get("runtime_seconds"))
+        all_rows, errors, completed, failed = _run_single_process(tasks, progress_path, error_path)
     else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            futs=[]
-            for task in tasks:
-                case=str(task.row_dict.get("case_id", task.row_dict.get("run_id", task.row_index))); LOGGER.info("[MP SUBMIT] row=%s case_id=%s", task.row_index, case); futs.append(ex.submit(compute_single_case_task, task))
-            for fut in as_completed(futs):
-                try:
-                    result=fut.result()
-                except Exception as e:
-                    failed += 1; LOGGER.error("[MP ERROR] row=unknown case_id=unknown error=%s", e); result={"success":False,"row_index":None,"case_id":"unknown","result_rows":[],"error_rows":[{"case_id":"unknown","status":"error","error_message":f"{type(e).__name__}: {e}"}],"runtime_seconds":float("nan")}
-                completed += 1; failed += 0 if result.get("success") else 1
-                all_rows.extend(result.get("result_rows", [])); errors.extend(result.get("error_rows", [])); append_rows_to_csv(result.get("result_rows", []), progress_path); append_rows_to_csv(result.get("error_rows", []), error_path)
-                LOGGER.info("[MP DONE] row=%s case_id=%s runtime_seconds=%s", result.get("row_index"), result.get("case_id"), result.get("runtime_seconds"))
+        try:
+            ctx = _process_pool_context(use_gpu, workers)
+            executor_kwargs={"max_workers": workers}
+            if ctx is not None:
+                executor_kwargs["mp_context"] = ctx
+            with ProcessPoolExecutor(**executor_kwargs) as ex:
+                futs=[]
+                for task in tasks:
+                    case=str(task.row_dict.get("case_id", task.row_dict.get("run_id", task.row_index))); LOGGER.info("[MP SUBMIT] row=%s case_id=%s", task.row_index, case); futs.append(ex.submit(compute_single_case_task, task))
+                for fut in as_completed(futs):
+                    try:
+                        result=fut.result()
+                    except Exception as e:
+                        failed += 1; LOGGER.error("[MP ERROR] row=unknown case_id=unknown error=%s", e); result={"success":False,"row_index":None,"case_id":"unknown","result_rows":[],"error_rows":[{"case_id":"unknown","status":"error","error_message":f"{type(e).__name__}: {e}"}],"runtime_seconds":float("nan")}
+                    completed += 1; failed += 0 if result.get("success") else 1
+                    all_rows.extend(result.get("result_rows", [])); errors.extend(result.get("error_rows", [])); append_rows_to_csv(result.get("result_rows", []), progress_path); append_rows_to_csv(result.get("error_rows", []), error_path)
+                    LOGGER.info("[MP DONE] row=%s case_id=%s runtime_seconds=%s", result.get("row_index"), result.get("case_id"), result.get("runtime_seconds"))
+        except Exception as e:
+            LOGGER.error("[MP ERROR] failed to start or run process pool with num_workers=%s use_gpu=%s error=%s; falling back to num_workers=1", workers, use_gpu, e)
+            all_rows, errors, completed, failed = _run_single_process(tasks, progress_path, error_path)
     LOGGER.info("[MP SUMMARY] submitted=%s completed=%s failed=%s", len(tasks), completed, failed)
     return _finalize_outputs(tasks, all_rows, errors, outdir, progress_path)
