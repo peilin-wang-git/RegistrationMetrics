@@ -1,4 +1,5 @@
 import logging
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
 import nibabel as nib
@@ -79,6 +80,37 @@ def test_multiprocessing_progress_written_by_main_process(tmp_path, caplog):
     assert len(pd.read_csv(progress)) == 2
     assert "[MP DONE]" in caplog.text
     assert "[SAVE PROGRESS] appended_rows=" in caplog.text
+
+
+def test_gpu_single_worker_does_not_log_fork_warning(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="registration_metrics")
+    cfg = _config(tmp_path, [_row(tmp_path, "case1")])
+    compute_from_config(cfg, tmp_path / "out", enable_global=False, enable_seg=False, enable_dvf=False, enable_motion=False, enable_vertebra=False, use_gpu=True, num_workers=1)
+    assert "Cannot re-initialize CUDA in forked subprocess" not in caplog.text
+    assert "[MP GPU] use_gpu=True" not in caplog.text
+
+
+def test_gpu_multiprocessing_uses_spawn_context():
+    import registration_metrics.io_utils as io
+    ctx = io._process_pool_context(use_gpu=True, workers=2)
+    assert ctx is not None
+    assert ctx.get_start_method() == "spawn"
+    assert ctx is mp.get_context("spawn")
+
+
+def test_worker_creates_device_inside_worker(monkeypatch, tmp_path):
+    import registration_metrics.io_utils as io
+    calls = []
+    row = _row(tmp_path, "case_worker_device")
+    cfg = _config(tmp_path, [row])
+
+    def fake_get_device(use_gpu, requested_device):
+        calls.append((use_gpu, requested_device))
+        return "cpu"
+
+    monkeypatch.setattr(io, "get_device", fake_get_device)
+    compute_from_config(cfg, tmp_path / "out_device", enable_global=False, enable_seg=False, enable_dvf=False, enable_motion=False, enable_vertebra=False, use_gpu=True, requested_device="cuda:7", num_workers=1)
+    assert calls == [(True, "cuda:7")]
 
 
 def test_intensity_normalization_range():
