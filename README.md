@@ -68,8 +68,38 @@ python -m registration_metrics.cli plot \
   --case-motion-csv ./metrics_out/case_motion_metrics.csv \
   --output-dir ./figures \
   --hue center \
-  --x modality
+  --x modality \
+  --save-statistics
 ```
+
+`plot` also accepts multiple metrics CSV files and optional multiple case-motion CSV files in one command:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv \
+    /path/a/combined_metrics.csv \
+    /path/b/combined_metrics.csv \
+    /path/c/combined_metrics.csv \
+  --case-motion-csv \
+    /path/a/case_motion_metrics.csv \
+    /path/b/case_motion_metrics.csv \
+  --output-dir ./metrics_all/figures \
+  --hue center \
+  --x modality \
+  --save-statistics
+```
+
+The plot command saves merged plot inputs and descriptive statistics in the plot output directory:
+
+- `merged_metrics_for_plot.csv`
+- `merged_case_motion_for_plot.csv` when `--case-motion-csv` is provided
+- `merged_all_for_plot.csv`
+- `plot_statistics_overall.csv`
+- `plot_statistics_by_group.csv`
+- `plot_statistics_by_x_hue.csv`
+- one PNG/PDF/SVG figure per available metric
+
+When multiple CSV files have different columns, they are concatenated with `pd.concat(sort=False)`, so missing values become `NaN`. Plotting drops `NaN` rows for the current x/hue/metric combination, and statistics ignore `NaN` values while reporting `missing_count`. `Frame`/`frame` metadata is excluded from metric statistics, and `source_csv` records the source file for each merged row.
 
 ```bash
 python -m registration_metrics.cli all \
