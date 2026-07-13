@@ -135,6 +135,65 @@ python -m registration_metrics.cli plot \
 ```
 
 
+Figure size controls:
+
+- By default, plot automatically increases figure size from the number of x groups, maximum x label length, and number of outside legend entries.
+- Use `--fig-width` and `--fig-height` to manually set size in inches.
+- Use `--aspect-ratio` such as `16:9`, `4:3`, or `3:2` to keep a desired ratio while still letting the command infer the missing dimension.
+- Use `--no-auto-figure-size` when you want fully manual sizing.
+
+Automatic size example:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv a.csv b.csv c.csv \
+  --output-dir ./figures \
+  --x center,organ,modality \
+  --hue method \
+  --save-statistics
+```
+
+Manual width/height example:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv a.csv b.csv c.csv \
+  --output-dir ./figures \
+  --x center,organ,modality \
+  --hue method \
+  --fig-width 26 \
+  --fig-height 10 \
+  --save-statistics
+```
+
+Aspect-ratio example:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv a.csv b.csv c.csv \
+  --output-dir ./figures \
+  --x center,organ,modality \
+  --hue method \
+  --aspect-ratio 16:9 \
+  --save-statistics
+```
+
+Fully manual sizing example:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv a.csv b.csv c.csv \
+  --output-dir ./figures \
+  --x center,organ,modality \
+  --hue method \
+  --fig-width 28 \
+  --fig-height 12 \
+  --no-auto-figure-size \
+  --save-statistics
+```
+
+
+
 ```bash
 python -m registration_metrics.cli all \
   --config config.yaml \

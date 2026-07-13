@@ -303,6 +303,9 @@ from registration_metrics.plot_violin import (
     _apply_plot_layout,
     _figure_size_for_x_groups,
     _save_plot_figure,
+    infer_figure_size,
+    infer_layout_adjustment,
+    parse_aspect_ratio,
 )
 import matplotlib.pyplot as plt
 
@@ -344,10 +347,10 @@ def test_save_plot_figure_uses_tight_bbox(monkeypatch, tmp_path):
 def test_figure_size_expands_for_many_composite_x_groups():
     small = _figure_size_for_x_groups(3)
     large = _figure_size_for_x_groups(20)
-    assert small == (8, 6)
+    assert small[0] >= 12
     assert large[0] > small[0]
-    assert large[0] <= 24
-    assert large[1] == 6
+    assert large[0] <= 32
+    assert large[1] >= 6
 
 
 def test_plot_layout_without_legend_still_rotates_xticks():
@@ -361,3 +364,60 @@ def test_plot_layout_without_legend_still_rotates_xticks():
     assert ax.get_legend() is None
     assert all(label.get_rotation() == 12 for label in ax.get_xticklabels())
     plt.close(fig)
+
+
+def test_parse_aspect_ratio():
+    assert parse_aspect_ratio("16:9") == (16, 9)
+    assert parse_aspect_ratio("4:3") == (4, 3)
+    assert parse_aspect_ratio(None) is None
+
+
+def test_manual_figsize_overrides_auto():
+    assert infer_figure_size(20, 20, 40, True, fig_width=24, fig_height=10) == (24, 10)
+
+
+def test_auto_figsize_increases_with_x_groups():
+    small = infer_figure_size(4, 0, 8, False)
+    large = infer_figure_size(20, 0, 8, False)
+    assert large[0] > small[0]
+
+
+def test_auto_figsize_increases_with_long_labels():
+    short = infer_figure_size(8, 0, 10, False)
+    long = infer_figure_size(8, 0, 45, False)
+    assert long[0] > short[0]
+    _, bottom_short = infer_layout_adjustment(10, False, 0, False)
+    _, bottom_long = infer_layout_adjustment(45, False, 0, True)
+    assert bottom_long > bottom_short
+
+
+def test_auto_figsize_increases_when_legend_exists():
+    no_legend = infer_figure_size(8, 0, 10, False)
+    with_legend = infer_figure_size(8, 20, 10, True)
+    right_many, _ = infer_layout_adjustment(10, True, 20, False)
+    right_few, _ = infer_layout_adjustment(10, True, 4, False)
+    assert with_legend[0] > no_legend[0]
+    assert right_many < right_few
+
+
+def test_plot_with_manual_figsize(tmp_path):
+    csv = tmp_path / "metrics.csv"
+    _write_metrics(csv, [{"Method":"DDEM", "Center":"A", "Modality":"T1w", "nmi_warped_fixed":0.8}])
+    out = tmp_path / "figures"
+
+    plot_violin(metrics_csv=csv, output_dir=out, x="modality", hue="method", fig_width=24, fig_height=10)
+
+    assert (out / "nmi_warped_fixed.png").exists()
+
+
+def test_plot_with_aspect_ratio_only(tmp_path):
+    csv = tmp_path / "metrics.csv"
+    _write_metrics(csv, [
+        {"Method":"DDEM", "Center":"A", "Modality":"T1w", "nmi_warped_fixed":0.8},
+        {"Method":"FewShot", "Center":"B", "Modality":"T2w", "nmi_warped_fixed":0.9},
+    ])
+    out = tmp_path / "figures"
+
+    plot_violin(metrics_csv=csv, output_dir=out, x="modality", hue="method", aspect_ratio="16:9")
+
+    assert (out / "nmi_warped_fixed.png").exists()

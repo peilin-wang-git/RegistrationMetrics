@@ -372,16 +372,81 @@ def save_plot_statistics(df: pd.DataFrame, output_dir: Path, x: str | None, hue:
 
 
 
+
+def parse_aspect_ratio(value: str | None) -> tuple[float, float] | None:
+    """Parse aspect ratio strings such as 16:9, 4:3, or 3:2."""
+    if value is None or str(value).strip() == "" or str(value).strip().lower() == "none":
+        return None
+    parts=str(value).strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid aspect_ratio format: {value}. Expected format like 16:9.")
+    try:
+        width_ratio=float(parts[0]); height_ratio=float(parts[1])
+    except ValueError as exc:
+        raise ValueError(f"Invalid aspect_ratio values: {value}. Expected numeric ratio like 16:9.") from exc
+    if width_ratio <= 0 or height_ratio <= 0:
+        raise ValueError(f"Invalid aspect_ratio values: {value}. Ratios must be positive.")
+    return width_ratio, height_ratio
+
+
+def infer_figure_size(n_x_groups: int, n_legend_items: int, max_xtick_label_len: int, has_legend: bool, fig_width: float | None = None, fig_height: float | None = None, aspect_ratio: str | None = None, auto_figure_size: bool = True, min_fig_width: float = 12.0, max_fig_width: float = 32.0, base_fig_height: float = 6.5, legend_space_ratio: float = 0.35) -> tuple[float, float]:
+    """Decide final figure size in inches."""
+    ratio=parse_aspect_ratio(aspect_ratio)
+    if fig_width is not None and fig_height is not None:
+        if ratio is not None:
+            LOGGER.info("[PLOT SIZE] aspect_ratio=%s ignored because user-provided fig_width and fig_height override auto sizing", aspect_ratio)
+        LOGGER.info("[PLOT SIZE] user-provided figsize=(%s, %s) overrides auto sizing", fig_width, fig_height)
+        return float(fig_width), float(fig_height)
+    main_width=max(float(min_fig_width), 1.2 * max(n_x_groups, 1) + 4.0) if auto_figure_size else float(min_fig_width)
+    label_bonus=min(8.0, max(0.0, (max_xtick_label_len - 18) * 0.18)) if auto_figure_size else 0.0
+    legend_bonus=0.0
+    if has_legend and auto_figure_size:
+        legend_bonus=max(3.5, min(12.0, float(legend_space_ratio) * max(n_legend_items, 1)))
+    auto_width=min(main_width + label_bonus + legend_bonus, float(max_fig_width))
+    long_label_bonus=1.0 if max_xtick_label_len > 20 and auto_figure_size else 0.0
+    legend_height_bonus=0.5 if n_legend_items > 12 and has_legend and auto_figure_size else 0.0
+    auto_height=max(6.0, float(base_fig_height) + long_label_bonus + legend_height_bonus)
+    width=float(fig_width) if fig_width is not None else auto_width
+    height=float(fig_height) if fig_height is not None else auto_height
+    if ratio is not None:
+        ratio_w, ratio_h=ratio
+        if fig_width is not None and fig_height is None:
+            height=width * ratio_h / ratio_w
+            LOGGER.info("[PLOT SIZE] aspect_ratio=%s applied to user width %s => final_figsize=(%s, %s)", aspect_ratio, width, width, height)
+        elif fig_height is not None and fig_width is None:
+            width=height * ratio_w / ratio_h
+            LOGGER.info("[PLOT SIZE] aspect_ratio=%s applied to user height %s => final_figsize=(%s, %s)", aspect_ratio, height, width, height)
+        elif fig_width is None and fig_height is None:
+            height=width * ratio_h / ratio_w
+            LOGGER.info("[PLOT SIZE] aspect_ratio=%s applied to auto width %s => final_figsize=(%s, %s)", aspect_ratio, width, width, height)
+    return float(width), float(height)
+
+
+def infer_layout_adjustment(max_xtick_label_len: int, has_legend: bool, n_legend_items: int, is_composite_x: bool) -> tuple[float, float]:
+    """Return right and bottom subplot margins for readable labels and outside legend."""
+    if has_legend:
+        right=0.68 if n_legend_items > 12 else 0.74
+    else:
+        right=0.95
+    bottom=0.22
+    if max_xtick_label_len > 20:
+        bottom=0.30
+    if max_xtick_label_len > 35:
+        bottom=0.38
+    if is_composite_x:
+        bottom=max(bottom, 0.30)
+    LOGGER.info("[PLOT SIZE] layout_adjustment right=%s bottom=%s", right, bottom)
+    if bottom > 0.22:
+        LOGGER.info("[PLOT LAYOUT] bottom margin adjusted to %s due to long x tick labels", bottom)
+    return right, bottom
+
+
 def _figure_size_for_x_groups(n_x_groups: int) -> tuple[float, float]:
-    """Return a wider figure size when many x groups are plotted."""
-    base_width=8
-    width=base_width if n_x_groups <= 6 else min(24, base_width + 0.6 * n_x_groups)
-    height=6
-    LOGGER.info("[PLOT LAYOUT] n_x_groups=%s figure_size=(%s, %s)", n_x_groups, width, height)
-    return width, height
+    """Backward-compatible wrapper for default automatic layout sizing."""
+    return infer_figure_size(n_x_groups, 0, 0, False)
 
 
-def _apply_plot_layout(fig, ax, has_legend: bool) -> None:
+def _apply_plot_layout(fig, ax, has_legend: bool, right: float = 0.95, bottom: float = 0.22) -> None:
     """Move legends outside the plot and lightly rotate x tick labels."""
     for label in ax.get_xticklabels():
         label.set_rotation(12)
@@ -397,17 +462,17 @@ def _apply_plot_layout(fig, ax, has_legend: bool) -> None:
         ax.legend(handles, labels, title=title, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=True, fontsize=8, title_fontsize=9)
         LOGGER.info("[PLOT LAYOUT] legend moved outside figure")
         LOGGER.info("[PLOT LAYOUT] legend_loc=upper left bbox_to_anchor=(1.02,1.0)")
-        fig.tight_layout(rect=[0, 0, 0.82, 1])
-        LOGGER.info("[PLOT LAYOUT] applied tight layout with extra space for outside legend")
+        fig.subplots_adjust(right=right, bottom=bottom)
+        LOGGER.info("[PLOT LAYOUT] applied subplot adjustment with extra space for outside legend")
     else:
-        fig.tight_layout()
+        fig.subplots_adjust(right=right, bottom=bottom)
 
 
 def _save_plot_figure(fig, path: Path) -> None:
     """Save a figure without cropping outside legends."""
     fig.savefig(path, dpi=600, bbox_inches="tight", pad_inches=0.2)
 
-def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|None=None, x: str|None=None, metrics: list[str]|None=None, save_statistics: bool=False, statistics_group_cols=None, save_merged_plot_input: bool=True, shade_by: str|None="auto", max_shade_levels: int=8) -> None:
+def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|None=None, x: str|None=None, metrics: list[str]|None=None, save_statistics: bool=False, statistics_group_cols=None, save_merged_plot_input: bool=True, shade_by: str|None="auto", max_shade_levels: int=8, fig_width: float|None=None, fig_height: float|None=None, aspect_ratio: str|None=None, auto_figure_size: bool=True, min_fig_width: float=12.0, max_fig_width: float=32.0, base_fig_height: float=6.5, legend_space_ratio: float=0.35) -> None:
     """Read metric CSV files and save one PNG/PDF/SVG violin plot per metric at 600 DPI."""
     out=Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     metrics_df=standardize_plot_metadata_columns(load_and_merge_metric_csvs(metrics_csv, "metrics", LOGGER))
@@ -445,11 +510,18 @@ def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|Non
         sub=plot_df[cols].dropna(); LOGGER.info("[PLOT] metric=%s x=%s hue=%s valid_rows=%s", m, final_x, plot_hue, len(sub))
         if sub.empty or pd.to_numeric(sub[m], errors="coerce").dropna().empty:
             LOGGER.info("[PLOT SKIP] metric=%s reason=no_finite_values", m); continue
-        n_x_groups=sub[final_x].nunique(dropna=True)
-        fig, ax=plt.subplots(figsize=_figure_size_for_x_groups(int(n_x_groups)))
+        n_x_groups=int(sub[final_x].nunique(dropna=True))
+        n_legend_items=int(sub[plot_hue].nunique(dropna=True)) if plot_hue else 0
+        max_xtick_label_len=max((len(str(v)) for v in sub[final_x].dropna().unique()), default=0)
+        LOGGER.info("[PLOT SIZE] metric=%s n_x_groups=%s n_legend_items=%s max_xtick_label_len=%s", m, n_x_groups, n_legend_items, max_xtick_label_len)
+        LOGGER.info("[PLOT SIZE] user_fig_width=%s user_fig_height=%s aspect_ratio=%s auto_figure_size=%s", fig_width, fig_height, aspect_ratio, auto_figure_size)
+        figsize=infer_figure_size(n_x_groups, n_legend_items, max_xtick_label_len, bool(plot_hue), fig_width, fig_height, aspect_ratio, auto_figure_size, min_fig_width, max_fig_width, base_fig_height, legend_space_ratio)
+        LOGGER.info("[PLOT SIZE] final_figsize=%s", figsize)
+        right, bottom=infer_layout_adjustment(max_xtick_label_len, bool(plot_hue), n_legend_items, final_x == "_x_group")
+        fig, ax=plt.subplots(figsize=figsize)
         sns.violinplot(data=sub, x=final_x, y=m, hue=plot_hue, palette=palette or None, inner="box", cut=0, ax=ax)
         ax.set_title(m, fontsize=12); ax.set_xlabel(final_x); ax.set_ylabel(m)
-        _apply_plot_layout(fig, ax, has_legend=bool(plot_hue))
+        _apply_plot_layout(fig, ax, has_legend=bool(plot_hue), right=right, bottom=bottom)
         for ext in ["png","pdf","svg"]:
             path=out/f"{m}.{ext}"; _save_plot_figure(fig, path); LOGGER.info("[PLOT] save path=%s", path)
         plt.close(fig)
