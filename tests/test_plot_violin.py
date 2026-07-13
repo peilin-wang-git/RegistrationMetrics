@@ -119,12 +119,12 @@ from registration_metrics.plot_violin import (
 
 
 def test_infer_shade_by_auto_excludes_x_and_hue():
-    df = pd.DataFrame({
+    df = standardize_plot_metadata_columns(pd.DataFrame({
         "method": ["DDEM", "FewShot", "DDEM", "FewShot"],
         "center": ["A", "A", "B", "B"],
         "modality": ["T1w", "T2w", "T1w", "T2w"],
-    })
-    assert infer_shade_by(df, x="method", hue="center", shade_by="auto") == ["modality"]
+    }))
+    assert infer_shade_by(df, x="method", hue="center", shade_by="auto") == ["task"]
 
 
 def test_infer_shade_by_none():
@@ -134,9 +134,9 @@ def test_infer_shade_by_none():
 
 def test_manual_shade_by_multiple_columns():
     df = pd.DataFrame({"modality": ["T1w"], "task": ["Liver"]})
-    assert infer_shade_by(df, x=None, hue=None, shade_by="modality,task") == ["modality"]
+    assert infer_shade_by(df, x=None, hue=None, shade_by="modality,task") == ["task"]
     out = build_shade_group_column(df, ["modality", "task"])
-    assert out["_shade_group"].iloc[0] == "T1w"
+    assert out["_shade_group"].iloc[0] == "Liver"
 
 
 def test_color_group_combines_hue_and_shade():
@@ -220,12 +220,12 @@ def test_build_x_group():
 
 def test_composite_x_consumes_multiple_features():
     consumed = get_consumed_metadata_features(["center", "organ", "modality"], "method")
-    assert {"center", "organ", "modality", "method"}.issubset(consumed)
+    assert {"center", "organ", "task", "method"}.issubset(consumed)
 
 
 def test_analysis_group_consumes_center_organ_task():
     consumed = get_consumed_metadata_features(["analysis_group"], None)
-    assert {"analysis_group", "center", "organ", "modality"}.issubset(consumed)
+    assert {"analysis_group", "center", "organ", "task"}.issubset(consumed)
 
 
 def test_shade_disabled_when_x_hue_consume_all_varying_features():
@@ -244,7 +244,7 @@ def test_shade_auto_uses_remaining_features():
         "modality": ["T1w", "T2w", "T1w", "T2w"],
         "task": ["Liver", "Kidney", "Liver", "Kidney"],
     })
-    assert infer_shade_by(df, x_cols=["center"], hue="method", shade_by="auto") == ["modality"]
+    assert infer_shade_by(df, x_cols=["center"], hue="method", shade_by="auto") == ["task"]
 
 
 def test_manual_shade_by_repeated_with_x_raises():
@@ -286,7 +286,7 @@ def test_statistics_with_composite_x_contains_original_x_cols(tmp_path):
     plot_violin(metrics_csv=csv, output_dir=out, x="center,organ,modality", hue="method", save_statistics=True)
 
     stats = pd.read_csv(out / "plot_statistics_by_x_hue.csv")
-    assert {"center", "organ", "modality", "_x_group"}.issubset(set(stats.columns))
+    assert {"center", "organ", "task", "_x_group"}.issubset(set(stats.columns))
 
 
 def test_internal_group_columns_excluded_from_metric_columns(tmp_path):
@@ -431,14 +431,14 @@ from registration_metrics.plot_violin import (
 
 
 def test_task_and_modality_are_same_feature():
-    assert canonical_feature_name("Task") == "modality"
-    assert canonical_feature_name("task") == "modality"
-    assert canonical_feature_name("Modality") == "modality"
-    assert canonical_feature_name("modality") == "modality"
+    assert canonical_feature_name("Task") == "task"
+    assert canonical_feature_name("task") == "task"
+    assert canonical_feature_name("Modality") == "task"
+    assert canonical_feature_name("modality") == "task"
 
 
 def test_deduplicate_semantic_columns():
-    assert deduplicate_semantic_columns(["center", "modality", "task", "organ"]) == ["center", "modality", "organ"]
+    assert deduplicate_semantic_columns(["center", "modality", "task", "organ"]) == ["center", "task", "organ"]
 
 
 def test_shade_not_repeated_when_x_uses_modality():
@@ -481,3 +481,87 @@ def test_violin_spacing_not_too_crowded_single_group():
     gaps = np.diff(vals)
     assert np.allclose(gaps, 0.18)
     assert max(vals) - min(vals) > 0.5
+
+from registration_metrics.plot_violin import (
+    infer_hue_column,
+    infer_x_columns,
+    resolve_preferred_grouping_column,
+    standardize_plot_metadata_columns,
+)
+
+
+def test_modality_maps_to_task_feature():
+    assert canonical_feature_name("modality") == "task"
+    assert canonical_feature_name("Modality") == "task"
+    assert canonical_feature_name("task") == "task"
+    assert canonical_feature_name("Task") == "task"
+
+
+def test_standardize_fills_task_from_modality():
+    df = pd.DataFrame({"modality": ["DWI->4D"]})
+    out = standardize_plot_metadata_columns(df)
+    assert "task" in out.columns
+    assert out["task"].iloc[0] == "DWI->4D"
+
+
+def test_grouping_prefers_task_over_modality():
+    df = standardize_plot_metadata_columns(pd.DataFrame({"task": ["T1w->4D"], "modality": ["wrong"]}))
+    assert resolve_preferred_grouping_column(df, "task") == "task"
+
+
+def test_user_x_modality_replaced_by_task():
+    df = standardize_plot_metadata_columns(pd.DataFrame({
+        "center": ["A", "B"], "modality": ["DWI->4D", "T1w->4D"], "organ": ["liver", "liver"]
+    }))
+    assert infer_x_columns(df, "center,modality,organ") == ["center", "task", "organ"]
+
+
+def test_auto_x_uses_task_not_modality():
+    df = standardize_plot_metadata_columns(pd.DataFrame({
+        "center": ["A", "B"], "task": ["DWI->4D", "T1w->4D"], "modality": ["debug1", "debug2"], "organ": ["liver", "kidney"]
+    }))
+    x_cols = infer_x_columns(df, None)
+    assert "task" in x_cols
+    assert "modality" not in x_cols
+
+
+def test_auto_hue_uses_task_not_modality():
+    df = standardize_plot_metadata_columns(pd.DataFrame({
+        "center": ["A", "A"], "task": ["DWI->4D", "T1w->4D"], "modality": ["debug1", "debug2"]
+    }))
+    hue = infer_hue_column(df, ["center"], None)
+    assert hue == "task"
+
+
+def test_movement_error_uses_task_when_no_modality_column(tmp_path):
+    metrics = tmp_path / "metrics.csv"
+    motion = tmp_path / "motion.csv"
+    _write_metrics(metrics, [{"Method":"DDEM", "Center":"A", "Task":"DWI->4D", "Organ":"liver", "nmi_warped_fixed":0.8}])
+    _write_metrics(motion, [
+        {"Method":"DDEM", "Center":"A", "Task":"DWI->4D", "Organ":"liver", "MovementError":1.0},
+        {"Method":"DDEM", "Center":"A", "Task":"T1w->4D", "Organ":"liver", "MovementError":2.0},
+    ])
+    out = tmp_path / "figures"
+
+    plot_violin(metrics_csv=metrics, case_motion_csv=motion, output_dir=out, x="center,task,organ", hue="method")
+
+    merged = pd.read_csv(out / "merged_all_for_plot.csv")
+    assert merged["_x_group"].astype(str).str.contains("Unknown").sum() == 0
+    assert merged["_x_group"].nunique() >= 2
+    assert (out / "debug_plot_rows_MovementError.csv").exists()
+
+
+def test_debug_csv_contains_task_and_modality_but_grouping_uses_task(tmp_path):
+    metrics = tmp_path / "metrics.csv"
+    _write_metrics(metrics, [
+        {"Method":"DDEM", "Center":"A", "Task":"DWI->4D", "Modality":"debug-mod", "Organ":"liver", "MovementError":1.0},
+        {"Method":"DDEM", "Center":"A", "Task":"T1w->4D", "Modality":"debug-mod2", "Organ":"liver", "MovementError":2.0},
+    ])
+    out = tmp_path / "figures"
+
+    plot_violin(metrics_csv=metrics, output_dir=out, x="center,task,organ", hue="method")
+
+    debug = pd.read_csv(out / "debug_plot_rows_MovementError.csv")
+    assert "Modality" in debug.columns
+    assert "Task" in debug.columns
+    assert debug["_x_group"].astype(str).str.contains("DWI->4D|T1w->4D", regex=True).any()

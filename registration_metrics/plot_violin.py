@@ -10,15 +10,15 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 LOGGER=logging.getLogger("registration_metrics")
 DEFAULT_METRICS=["nmi_warped_fixed","ssim_warped_fixed","lcc_warped_fixed","dice_foreground_warped_fixed","iou_foreground_warped_fixed","hd95_foreground_warped_fixed","assd_foreground_warped_fixed","folding_ratio","jacobian_mean","VertebraNCC_warped_fixed","MovementError","MovementError_AP","MovementError_RL","MovementError_SI","MotionPCC_AllDirections","MotionAMD_AllDirections","MotionMAPE_percent_AllDirections","MotionRMSE_AllDirections","AmplitudeAMD"]
-_METADATA_ALIASES={"Method":"method","Center":"center","Modality":"modality","Task":"task","Organ":"organ","AnalysisGroup":"analysis_group","CaseID":"case_id","Frame":"frame"}
-_FEATURE_ALIASES={"Method":"method","method":"method","Center":"center","center":"center","Modality":"modality","modality":"modality","Task":"modality","task":"modality","Organ":"organ","organ":"organ","AnalysisGroup":"analysis_group","analysis_group":"analysis_group"}
-_FEATURE_COLUMNS={"method":["method","Method"],"center":["center","Center"],"modality":["modality","Modality","task","Task"],"organ":["organ","Organ"],"analysis_group":["analysis_group","AnalysisGroup"]}
+_METADATA_ALIASES={"Method":"method","Center":"center","Task":"task","Organ":"organ","AnalysisGroup":"analysis_group","CaseID":"case_id","Frame":"frame"}
+_FEATURE_ALIASES={"Method":"method","method":"method","Center":"center","center":"center","Modality":"task","modality":"task","Task":"task","task":"task","Organ":"organ","organ":"organ","AnalysisGroup":"analysis_group","analysis_group":"analysis_group"}
+_FEATURE_COLUMNS={"method":["method","Method"],"center":["center","Center"],"task":["task","Task"],"organ":["organ","Organ"],"analysis_group":["analysis_group","AnalysisGroup"]}
 _STAT_METADATA_COLUMNS={"case_id","CaseID","Frame","frame","row_index","Method","method","Center","center","Modality","modality","Task","task","Organ","organ","AnalysisGroup","analysis_group","fixed_img_path","moving_img_path","warped_img_path","fixed_seg_path","moving_seg_path","warped_seg_path","transform_path","status","error_message","skip_reason","completed_at","run_id","runtime_seconds","source_csv","source_table_type","_x_group","_shade_group","_color_group"}
 _STAT_COLUMNS=["metric","count","missing_count","mean","var","std","median","q25","q75","iqr","min","max"]
-_X_COMPOSITE_PRIORITY=["center","organ","modality"]
-_X_FALLBACK_PRIORITY=["modality","center","organ","method"]
-_HUE_PRIORITY=["method","center","modality","organ"]
-_SHADE_PRIORITY=["modality","organ","center","method","analysis_group"]
+_X_COMPOSITE_PRIORITY=["center","task","organ"]
+_X_FALLBACK_PRIORITY=["task","center","organ","method"]
+_HUE_PRIORITY=["method","center","task","organ"]
+_SHADE_PRIORITY=["task","organ","center","method","analysis_group"]
 
 
 def _as_path_list(value) -> list[Path]:
@@ -64,21 +64,36 @@ def load_and_merge_metric_csvs(paths, table_name, logger=None) -> pd.DataFrame:
     return merged
 
 
+def _metadata_missing_mask(series: pd.Series) -> pd.Series:
+    """Return True for metadata values considered missing for grouping backfill."""
+    text=series.astype("string").str.strip().str.lower()
+    return series.isna() | text.isin(["", "unknown", "nan", "none", "<na>"])
+
+
+def _fill_column_from_source(out: pd.DataFrame, target: str, source: str, log_prefix: str = "[STANDARDIZE]") -> None:
+    if source not in out.columns:
+        return
+    if target not in out.columns:
+        out[target]=pd.NA
+    missing=_metadata_missing_mask(out[target])
+    n=int(missing.sum())
+    if n:
+        out.loc[missing, target]=out.loc[missing, source]
+        LOGGER.info("%s filled %s from %s n=%s", log_prefix, target, source, n)
+
+
 def standardize_plot_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Add lowercase metadata aliases without deleting or overwriting original columns."""
+    """Add metadata aliases and backfill Task/task from Modality/modality for grouping."""
     out=df.copy()
     for src, dst in _METADATA_ALIASES.items():
-        if src not in out.columns:
-            continue
-        if dst not in out.columns:
-            out[dst]=out[src]
-            LOGGER.info("[STANDARDIZE] added alias column %s from %s", dst, src)
-        else:
-            missing=out[dst].isna()
-            n_missing=int(missing.sum())
-            if n_missing:
-                out.loc[missing, dst]=out.loc[missing, src]
-                LOGGER.info("[STANDARDIZE] existing column %s preserved; filled missing values from %s", dst, src)
+        if src in out.columns:
+            _fill_column_from_source(out, dst, src)
+        if dst in out.columns:
+            _fill_column_from_source(out, src, dst)
+    for source in ["modality", "Modality"]:
+        _fill_column_from_source(out, "task", source, "[STANDARDIZE BACKFILL]")
+        _fill_column_from_source(out, "Task", source, "[STANDARDIZE BACKFILL]")
+    LOGGER.info("[PLOT FEATURE] Modality/modality retained for debug only; grouping uses Task/task")
     return out
 
 
@@ -87,11 +102,17 @@ def canonical_feature_name(col: str) -> str:
     return _FEATURE_ALIASES.get(col, col)
 
 
-def _preferred_existing_column(df: pd.DataFrame, feature: str) -> str | None:
+def resolve_preferred_grouping_column(df: pd.DataFrame, feature: str) -> str | None:
+    """Return preferred actual grouping column for a canonical feature."""
+    feature=canonical_feature_name(feature)
     for col in _FEATURE_COLUMNS.get(feature, [feature]):
         if col in df.columns:
             return col
     return None
+
+
+def _preferred_existing_column(df: pd.DataFrame, feature: str) -> str | None:
+    return resolve_preferred_grouping_column(df, feature)
 
 
 def _feature_has_variation(df: pd.DataFrame, feature: str) -> bool:
@@ -105,9 +126,28 @@ def _validate_columns_exist(df: pd.DataFrame, cols: list[str], option_name: str)
         raise ValueError(f"{option_name} columns not found: {missing}. Available columns: {list(df.columns)}")
 
 
+def resolve_grouping_columns(df: pd.DataFrame, cols: list[str], option_name: str) -> list[str]:
+    """Resolve user/grouping columns to preferred grouping columns, mapping Modality to Task."""
+    resolved=[]
+    for col in cols:
+        feature=canonical_feature_name(col)
+        if feature in _FEATURE_COLUMNS:
+            preferred=resolve_preferred_grouping_column(df, feature)
+            if preferred is None:
+                raise ValueError(f"{option_name} column {col} maps to {feature}, but no preferred grouping column is available. Available columns: {list(df.columns)}")
+            if col in {"modality", "Modality"}:
+                LOGGER.info("[PLOT %s] replaced user column %s with %s because grouping uses Task instead of Modality", option_name.upper(), col, preferred)
+            resolved.append(preferred)
+        else:
+            if col not in df.columns:
+                raise ValueError(f"{option_name} columns not found: {[col]}. Available columns: {list(df.columns)}")
+            resolved.append(col)
+    return deduplicate_semantic_columns(resolved)
+
+
 def deduplicate_semantic_columns(cols: list[str]) -> list[str]:
     """Drop duplicate semantic metadata columns, treating task and modality as one feature."""
-    preferred={"modality":["modality","Modality","task","Task"]}
+    preferred={"task":["task","Task","modality","Modality"]}
     out=[]; seen={}; dropped=[]
     for col in cols:
         feature=canonical_feature_name(col)
@@ -120,7 +160,7 @@ def deduplicate_semantic_columns(cols: list[str]) -> list[str]:
         else:
             dropped.append(col)
     if dropped:
-        LOGGER.info("[PLOT GROUP] removed duplicate semantic columns %s because they are equivalent to modality", dropped)
+        LOGGER.info("[PLOT GROUP] removed duplicate semantic columns %s because Modality/modality are fallback sources for Task/task", dropped)
     return out
 
 
@@ -140,8 +180,7 @@ def infer_x_columns(df: pd.DataFrame, user_x: str | None = None, auto_plot_mappi
     parsed=parse_column_list(user_x)
     LOGGER.info("[PLOT X] user_x=%s parsed_x_cols=%s", user_x, parsed)
     if parsed:
-        _validate_columns_exist(df, parsed, "x")
-        deduped=deduplicate_semantic_columns(parsed)
+        deduped=resolve_grouping_columns(df, parsed, "x")
         LOGGER.info("[PLOT X] original x_cols=%s", parsed)
         LOGGER.info("[PLOT X] deduplicated x_cols=%s", deduped)
         return deduped
@@ -171,7 +210,7 @@ def get_consumed_metadata_features(x_cols: list[str], hue: str | None) -> set[st
     if hue:
         consumed.add(canonical_feature_name(hue))
     if "analysis_group" in consumed:
-        consumed.update({"analysis_group","center","organ","modality"})
+        consumed.update({"analysis_group","center","organ","task"})
     return consumed
 
 
@@ -181,9 +220,11 @@ def infer_hue_column(df: pd.DataFrame, x_cols: list[str], user_hue: str | None =
     if parsed:
         if len(parsed) > 1:
             raise ValueError("--hue supports a single column; use one metadata column or --hue none.")
-        _validate_columns_exist(df, parsed, "hue")
-        LOGGER.info("[PLOT HUE] user_hue=%s inferred_hue=%s", user_hue, parsed[0])
-        return parsed[0]
+        resolved=resolve_grouping_columns(df, parsed, "hue")
+        if parsed[0] in {"modality", "Modality"}:
+            LOGGER.info("[PLOT HUE] replaced user hue %s with %s because grouping uses Task instead of Modality", parsed[0], resolved[0])
+        LOGGER.info("[PLOT HUE] user_hue=%s inferred_hue=%s", user_hue, resolved[0])
+        return resolved[0]
     if user_hue is not None and not parsed:
         LOGGER.info("[PLOT HUE] user_hue=%s inferred_hue=None", user_hue)
         return None
@@ -232,8 +273,7 @@ def infer_shade_by(df: pd.DataFrame, x_cols=None, hue: str | None = None, shade_
     LOGGER.info("[PLOT SHADE] remaining_features=%s", remaining)
     if str(shade_by).strip().lower() != "auto":
         original_cols=parse_column_list(shade_by)
-        _validate_columns_exist(df, original_cols, "shade_by")
-        cols=deduplicate_semantic_columns(original_cols)
+        cols=resolve_grouping_columns(df, original_cols, "shade_by")
         LOGGER.info("[PLOT SHADE] original shade_by_cols=%s", original_cols)
         LOGGER.info("[PLOT SHADE] deduplicated shade_by_cols=%s", cols)
         for col in cols:
@@ -552,6 +592,22 @@ def _draw_positioned_violins(ax, sub: pd.DataFrame, x_col: str, y_col: str, colo
     return positions, width
 
 
+def _unique_values_for_columns(df: pd.DataFrame, cols: list[str]) -> list[str]:
+    values=[]
+    for col in cols:
+        if col in df.columns:
+            values.extend(pd.Series(df[col]).dropna().astype(str).unique().tolist())
+    return list(dict.fromkeys(values))
+
+
+def _save_metric_debug_rows(df: pd.DataFrame, output_dir: Path, metric: str) -> None:
+    debug_cols=["source_csv","source_table_type","case_id","CaseID","Method","method","Center","center","Task","task","Modality","modality","Organ","organ","AnalysisGroup","analysis_group","_x_group","_color_group",metric]
+    cols=[c for c in debug_cols if c in df.columns]
+    path=output_dir/f"debug_plot_rows_{metric}.csv"
+    df[cols].to_csv(path, index=False)
+    LOGGER.info("[PLOT METRIC DEBUG] saved debug rows to %s", path)
+
+
 def _save_plot_figure(fig, path: Path) -> None:
     """Save a figure without cropping outside legends."""
     fig.savefig(path, dpi=600, bbox_inches="tight", pad_inches=0.2)
@@ -564,7 +620,7 @@ def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|Non
     if case_paths:
         case_motion_df=standardize_plot_metadata_columns(load_and_merge_metric_csvs(case_paths, "case_motion", LOGGER)); frames.append(case_motion_df)
     plot_df=standardize_plot_metadata_columns(pd.concat(frames, ignore_index=True, sort=False))
-    LOGGER.info("[PLOT FEATURE] canonical feature mapping: Task/task/Modality/modality -> modality")
+    LOGGER.info("[PLOT FEATURE] canonical feature mapping: Modality/modality -> task; grouping uses Task/task")
     x_cols, final_x, final_hue=infer_plot_mapping(plot_df, x, hue)
     if final_x == "_x_group":
         plot_df=build_composite_group_column(plot_df, x_cols, "_x_group")
@@ -595,6 +651,16 @@ def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|Non
         sub=plot_df[cols].dropna(); LOGGER.info("[PLOT] metric=%s x=%s hue=%s valid_rows=%s", m, final_x, plot_hue, len(sub))
         if sub.empty or pd.to_numeric(sub[m], errors="coerce").dropna().empty:
             LOGGER.info("[PLOT SKIP] metric=%s reason=no_finite_values", m); continue
+        LOGGER.info("[PLOT METRIC DEBUG] metric=%s", m)
+        LOGGER.info("[PLOT METRIC DEBUG] x_cols=%s", x_cols)
+        LOGGER.info("[PLOT METRIC DEBUG] hue=%s", final_hue)
+        LOGGER.info("[PLOT METRIC DEBUG] shade_by_cols=%s", shade_by_cols)
+        LOGGER.info("[PLOT METRIC DEBUG] unique Task/task values=%s", _unique_values_for_columns(plot_df, ["Task", "task"]))
+        LOGGER.info("[PLOT METRIC DEBUG] unique Modality/modality values=%s", _unique_values_for_columns(plot_df, ["Modality", "modality"]))
+        LOGGER.info("[PLOT METRIC DEBUG] Modality is not used for grouping; Task is used instead")
+        LOGGER.info("[PLOT METRIC DEBUG] unique_x_groups=%s", list(pd.Series(sub[final_x]).dropna().astype(str).unique()))
+        if m == "MovementError":
+            _save_metric_debug_rows(plot_df, out, m)
         n_x_groups=int(sub[final_x].nunique(dropna=True))
         n_legend_items=int(sub[plot_hue].nunique(dropna=True)) if plot_hue else 0
         max_xtick_label_len=max((len(str(v)) for v in sub[final_x].dropna().unique()), default=0)

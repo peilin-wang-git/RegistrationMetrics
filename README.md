@@ -104,7 +104,10 @@ When multiple CSV files have different columns, they are concatenated with `pd.c
 
 Color encoding for plots:
 
-- `--x` controls the x-axis grouping and can be one metadata column (`--x modality`) or comma-separated columns (`--x center,organ,modality`). Multiple x columns create a composite x-axis group such as `center | organ | modality`.
+Plot grouping uses `Task`/`task`, not `Modality`/`modality`. `Modality` is retained in merged/debug CSVs only and is used as a backward-compatible source to fill missing `Task`/`task` values. This matters for `case_motion_metrics.csv`, which may not contain `Modality`; Task is the intended task/modality grouping variable. If a user passes `--x modality` or `--hue modality`, plot maps it to `task` after backfilling Task from Modality when needed.
+
+
+- `--x` controls the x-axis grouping and can be one metadata column (`--x modality`) or comma-separated columns (`--x center,task,organ`). Multiple x columns create a composite x-axis group such as `center | task | organ`.
 - `--hue` controls the primary color family and remains a single metadata column.
 - `--shade-by` controls secondary within-hue shade encoding. The default is `auto`, which uses only metadata features that are still varying after excluding the features already covered by x and hue.
 - If x and hue already cover all varying metadata features, `--shade-by auto` disables shade encoding and uses only the primary hue colors.
@@ -117,7 +120,7 @@ For example, this uses a composite x-axis from Center + Organ + Modality and Met
 python -m registration_metrics.cli plot \
   --metrics-csv a.csv b.csv c.csv \
   --output-dir ./figures \
-  --x center,organ,modality \
+  --x center,task,organ \
   --hue method \
   --save-statistics
 ```
@@ -148,7 +151,7 @@ Automatic size example:
 python -m registration_metrics.cli plot \
   --metrics-csv a.csv b.csv c.csv \
   --output-dir ./figures \
-  --x center,organ,modality \
+  --x center,task,organ \
   --hue method \
   --save-statistics
 ```
@@ -159,7 +162,7 @@ Manual width/height example:
 python -m registration_metrics.cli plot \
   --metrics-csv a.csv b.csv c.csv \
   --output-dir ./figures \
-  --x center,organ,modality \
+  --x center,task,organ \
   --hue method \
   --fig-width 26 \
   --fig-height 10 \
@@ -172,7 +175,7 @@ Aspect-ratio example:
 python -m registration_metrics.cli plot \
   --metrics-csv a.csv b.csv c.csv \
   --output-dir ./figures \
-  --x center,organ,modality \
+  --x center,task,organ \
   --hue method \
   --aspect-ratio 16:9 \
   --save-statistics
@@ -184,7 +187,7 @@ Fully manual sizing example:
 python -m registration_metrics.cli plot \
   --metrics-csv a.csv b.csv c.csv \
   --output-dir ./figures \
-  --x center,organ,modality \
+  --x center,task,organ \
   --hue method \
   --fig-width 28 \
   --fig-height 12 \
