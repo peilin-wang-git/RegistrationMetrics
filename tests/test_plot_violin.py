@@ -298,3 +298,66 @@ def test_internal_group_columns_excluded_from_metric_columns(tmp_path):
 
     stats = pd.read_csv(out / "plot_statistics_overall.csv")
     assert not {"_x_group", "_shade_group", "_color_group"}.intersection(set(stats["metric"]))
+
+from registration_metrics.plot_violin import (
+    _apply_plot_layout,
+    _figure_size_for_x_groups,
+    _save_plot_figure,
+)
+import matplotlib.pyplot as plt
+
+
+def test_plot_layout_moves_legend_outside_and_rotates_xticks():
+    fig, ax = plt.subplots(figsize=(4, 3))
+    ax.plot([0, 1], [0, 1], label="Group A")
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Long label A", "Long label B"])
+    ax.legend(title="hue")
+
+    _apply_plot_layout(fig, ax, has_legend=True)
+
+    legend = ax.get_legend()
+    assert legend is not None
+    assert legend._loc == 2  # upper left
+    assert tuple(legend.get_bbox_to_anchor()._bbox.p1) == (1.02, 1.0)
+    assert all(label.get_rotation() == 12 for label in ax.get_xticklabels())
+    assert all(label.get_horizontalalignment() == "right" for label in ax.get_xticklabels())
+    plt.close(fig)
+
+
+def test_save_plot_figure_uses_tight_bbox(monkeypatch, tmp_path):
+    fig, _ = plt.subplots()
+    captured = {}
+
+    def fake_savefig(path, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(fig, "savefig", fake_savefig)
+    _save_plot_figure(fig, tmp_path / "plot.png")
+
+    assert captured["bbox_inches"] == "tight"
+    assert captured["pad_inches"] == 0.2
+    assert captured["dpi"] == 600
+    plt.close(fig)
+
+
+def test_figure_size_expands_for_many_composite_x_groups():
+    small = _figure_size_for_x_groups(3)
+    large = _figure_size_for_x_groups(20)
+    assert small == (8, 6)
+    assert large[0] > small[0]
+    assert large[0] <= 24
+    assert large[1] == 6
+
+
+def test_plot_layout_without_legend_still_rotates_xticks():
+    fig, ax = plt.subplots(figsize=(4, 3))
+    ax.plot([0, 1], [0, 1])
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["A", "B"])
+
+    _apply_plot_layout(fig, ax, has_legend=False)
+
+    assert ax.get_legend() is None
+    assert all(label.get_rotation() == 12 for label in ax.get_xticklabels())
+    plt.close(fig)

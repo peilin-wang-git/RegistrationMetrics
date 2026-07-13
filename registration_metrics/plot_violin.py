@@ -371,6 +371,42 @@ def save_plot_statistics(df: pd.DataFrame, output_dir: Path, x: str | None, hue:
         LOGGER.info("[STATS] saved x/hue/shade statistics to %s", shade_path)
 
 
+
+def _figure_size_for_x_groups(n_x_groups: int) -> tuple[float, float]:
+    """Return a wider figure size when many x groups are plotted."""
+    base_width=8
+    width=base_width if n_x_groups <= 6 else min(24, base_width + 0.6 * n_x_groups)
+    height=6
+    LOGGER.info("[PLOT LAYOUT] n_x_groups=%s figure_size=(%s, %s)", n_x_groups, width, height)
+    return width, height
+
+
+def _apply_plot_layout(fig, ax, has_legend: bool) -> None:
+    """Move legends outside the plot and lightly rotate x tick labels."""
+    for label in ax.get_xticklabels():
+        label.set_rotation(12)
+        label.set_horizontalalignment("right")
+        label.set_rotation_mode("anchor")
+        label.set_fontsize(9)
+    LOGGER.info("[PLOT LAYOUT] x tick labels rotated by 12 degrees to reduce overlap")
+    legend=ax.get_legend()
+    if has_legend and legend is not None:
+        title=legend.get_title().get_text()
+        handles, labels=ax.get_legend_handles_labels()
+        legend.remove()
+        ax.legend(handles, labels, title=title, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=True, fontsize=8, title_fontsize=9)
+        LOGGER.info("[PLOT LAYOUT] legend moved outside figure")
+        LOGGER.info("[PLOT LAYOUT] legend_loc=upper left bbox_to_anchor=(1.02,1.0)")
+        fig.tight_layout(rect=[0, 0, 0.82, 1])
+        LOGGER.info("[PLOT LAYOUT] applied tight layout with extra space for outside legend")
+    else:
+        fig.tight_layout()
+
+
+def _save_plot_figure(fig, path: Path) -> None:
+    """Save a figure without cropping outside legends."""
+    fig.savefig(path, dpi=600, bbox_inches="tight", pad_inches=0.2)
+
 def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|None=None, x: str|None=None, metrics: list[str]|None=None, save_statistics: bool=False, statistics_group_cols=None, save_merged_plot_input: bool=True, shade_by: str|None="auto", max_shade_levels: int=8) -> None:
     """Read metric CSV files and save one PNG/PDF/SVG violin plot per metric at 600 DPI."""
     out=Path(output_dir); out.mkdir(parents=True, exist_ok=True)
@@ -409,7 +445,11 @@ def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|Non
         sub=plot_df[cols].dropna(); LOGGER.info("[PLOT] metric=%s x=%s hue=%s valid_rows=%s", m, final_x, plot_hue, len(sub))
         if sub.empty or pd.to_numeric(sub[m], errors="coerce").dropna().empty:
             LOGGER.info("[PLOT SKIP] metric=%s reason=no_finite_values", m); continue
-        fig, ax=plt.subplots(figsize=(6,4)); sns.violinplot(data=sub, x=final_x, y=m, hue=plot_hue, palette=palette or None, inner="box", cut=0, ax=ax); ax.set_title(m); fig.tight_layout()
+        n_x_groups=sub[final_x].nunique(dropna=True)
+        fig, ax=plt.subplots(figsize=_figure_size_for_x_groups(int(n_x_groups)))
+        sns.violinplot(data=sub, x=final_x, y=m, hue=plot_hue, palette=palette or None, inner="box", cut=0, ax=ax)
+        ax.set_title(m, fontsize=12); ax.set_xlabel(final_x); ax.set_ylabel(m)
+        _apply_plot_layout(fig, ax, has_legend=bool(plot_hue))
         for ext in ["png","pdf","svg"]:
-            path=out/f"{m}.{ext}"; fig.savefig(path, dpi=600); LOGGER.info("[PLOT] save path=%s", path)
+            path=out/f"{m}.{ext}"; _save_plot_figure(fig, path); LOGGER.info("[PLOT] save path=%s", path)
         plt.close(fig)
