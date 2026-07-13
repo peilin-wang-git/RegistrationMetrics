@@ -134,9 +134,9 @@ def test_infer_shade_by_none():
 
 def test_manual_shade_by_multiple_columns():
     df = pd.DataFrame({"modality": ["T1w"], "task": ["Liver"]})
-    assert infer_shade_by(df, x=None, hue=None, shade_by="modality,task") == ["modality", "task"]
+    assert infer_shade_by(df, x=None, hue=None, shade_by="modality,task") == ["modality"]
     out = build_shade_group_column(df, ["modality", "task"])
-    assert out["_shade_group"].iloc[0] == "T1w | Liver"
+    assert out["_shade_group"].iloc[0] == "T1w"
 
 
 def test_color_group_combines_hue_and_shade():
@@ -225,7 +225,7 @@ def test_composite_x_consumes_multiple_features():
 
 def test_analysis_group_consumes_center_organ_task():
     consumed = get_consumed_metadata_features(["analysis_group"], None)
-    assert {"analysis_group", "center", "organ", "task"}.issubset(consumed)
+    assert {"analysis_group", "center", "organ", "modality"}.issubset(consumed)
 
 
 def test_shade_disabled_when_x_hue_consume_all_varying_features():
@@ -244,7 +244,7 @@ def test_shade_auto_uses_remaining_features():
         "modality": ["T1w", "T2w", "T1w", "T2w"],
         "task": ["Liver", "Kidney", "Liver", "Kidney"],
     })
-    assert infer_shade_by(df, x_cols=["center"], hue="method", shade_by="auto") == ["modality", "task"]
+    assert infer_shade_by(df, x_cols=["center"], hue="method", shade_by="auto") == ["modality"]
 
 
 def test_manual_shade_by_repeated_with_x_raises():
@@ -421,3 +421,63 @@ def test_plot_with_aspect_ratio_only(tmp_path):
     plot_violin(metrics_csv=csv, output_dir=out, x="modality", hue="method", aspect_ratio="16:9")
 
     assert (out / "nmi_warped_fixed.png").exists()
+
+from registration_metrics.plot_violin import (
+    canonical_feature_name,
+    compute_group_positions,
+    deduplicate_semantic_columns,
+    infer_violin_width,
+)
+
+
+def test_task_and_modality_are_same_feature():
+    assert canonical_feature_name("Task") == "modality"
+    assert canonical_feature_name("task") == "modality"
+    assert canonical_feature_name("Modality") == "modality"
+    assert canonical_feature_name("modality") == "modality"
+
+
+def test_deduplicate_semantic_columns():
+    assert deduplicate_semantic_columns(["center", "modality", "task", "organ"]) == ["center", "modality", "organ"]
+
+
+def test_shade_not_repeated_when_x_uses_modality():
+    df = pd.DataFrame({
+        "method": ["DDEM", "FewShot"],
+        "center": ["A", "B"],
+        "organ": ["Liver", "Kidney"],
+        "modality": ["T1w", "T2w"],
+        "task": ["Task1", "Task2"],
+    })
+    assert infer_shade_by(df, x_cols=["center", "organ", "modality"], hue="method", shade_by="auto") == []
+
+
+def test_compute_group_positions_multi_group():
+    positions = compute_group_positions(["A", "B"], {"A": ["m1", "m2"], "B": ["m1", "m2"]})
+    assert positions[("A", "m2")] - positions[("A", "m1")] == 0.18
+    center_a = (positions[("A", "m1")] + positions[("A", "m2")]) / 2
+    center_b = (positions[("B", "m1")] + positions[("B", "m2")]) / 2
+    assert round(center_b - center_a, 6) == 1.4
+
+
+def test_compute_group_positions_single_group():
+    positions = compute_group_positions(["A"], {"A": ["m1", "m2", "m3"]})
+    vals = [positions[("A", key)] for key in ["m1", "m2", "m3"]]
+    assert vals[1] == 0
+    assert round(vals[0] + vals[2], 6) == 0
+    assert min(vals) - 0.5 < min(vals)
+    assert max(vals) + 0.5 > max(vals)
+
+
+def test_violin_spacing_not_too_wide_multi_group():
+    positions = compute_group_positions(["A", "B", "C"], {"A": ["m1", "m2"], "B": ["m1", "m2"], "C": ["m1", "m2"]})
+    assert max(positions.values()) - min(positions.values()) <= 3.0
+    assert infer_violin_width(2, 0.18) >= 0.15
+
+
+def test_violin_spacing_not_too_crowded_single_group():
+    positions = compute_group_positions(["A"], {"A": ["m1", "m2", "m3", "m4"]})
+    vals = sorted(positions.values())
+    gaps = np.diff(vals)
+    assert np.allclose(gaps, 0.18)
+    assert max(vals) - min(vals) > 0.5

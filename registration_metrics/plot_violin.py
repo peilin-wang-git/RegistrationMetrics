@@ -11,14 +11,14 @@ from matplotlib.colors import to_rgb
 LOGGER=logging.getLogger("registration_metrics")
 DEFAULT_METRICS=["nmi_warped_fixed","ssim_warped_fixed","lcc_warped_fixed","dice_foreground_warped_fixed","iou_foreground_warped_fixed","hd95_foreground_warped_fixed","assd_foreground_warped_fixed","folding_ratio","jacobian_mean","VertebraNCC_warped_fixed","MovementError","MovementError_AP","MovementError_RL","MovementError_SI","MotionPCC_AllDirections","MotionAMD_AllDirections","MotionMAPE_percent_AllDirections","MotionRMSE_AllDirections","AmplitudeAMD"]
 _METADATA_ALIASES={"Method":"method","Center":"center","Modality":"modality","Task":"task","Organ":"organ","AnalysisGroup":"analysis_group","CaseID":"case_id","Frame":"frame"}
-_FEATURE_ALIASES={"Method":"method","method":"method","Center":"center","center":"center","Modality":"modality","modality":"modality","Task":"task","task":"task","Organ":"organ","organ":"organ","AnalysisGroup":"analysis_group","analysis_group":"analysis_group"}
-_FEATURE_COLUMNS={"method":["method","Method"],"center":["center","Center"],"modality":["modality","Modality"],"task":["task","Task"],"organ":["organ","Organ"],"analysis_group":["analysis_group","AnalysisGroup"]}
+_FEATURE_ALIASES={"Method":"method","method":"method","Center":"center","center":"center","Modality":"modality","modality":"modality","Task":"modality","task":"modality","Organ":"organ","organ":"organ","AnalysisGroup":"analysis_group","analysis_group":"analysis_group"}
+_FEATURE_COLUMNS={"method":["method","Method"],"center":["center","Center"],"modality":["modality","Modality","task","Task"],"organ":["organ","Organ"],"analysis_group":["analysis_group","AnalysisGroup"]}
 _STAT_METADATA_COLUMNS={"case_id","CaseID","Frame","frame","row_index","Method","method","Center","center","Modality","modality","Task","task","Organ","organ","AnalysisGroup","analysis_group","fixed_img_path","moving_img_path","warped_img_path","fixed_seg_path","moving_seg_path","warped_seg_path","transform_path","status","error_message","skip_reason","completed_at","run_id","runtime_seconds","source_csv","source_table_type","_x_group","_shade_group","_color_group"}
 _STAT_COLUMNS=["metric","count","missing_count","mean","var","std","median","q25","q75","iqr","min","max"]
-_X_COMPOSITE_PRIORITY=["center","organ","modality","task"]
-_X_FALLBACK_PRIORITY=["modality","center","task","organ","method"]
-_HUE_PRIORITY=["method","center","modality","task","organ"]
-_SHADE_PRIORITY=["modality","task","organ","center","method","analysis_group"]
+_X_COMPOSITE_PRIORITY=["center","organ","modality"]
+_X_FALLBACK_PRIORITY=["modality","center","organ","method"]
+_HUE_PRIORITY=["method","center","modality","organ"]
+_SHADE_PRIORITY=["modality","organ","center","method","analysis_group"]
 
 
 def _as_path_list(value) -> list[Path]:
@@ -105,9 +105,29 @@ def _validate_columns_exist(df: pd.DataFrame, cols: list[str], option_name: str)
         raise ValueError(f"{option_name} columns not found: {missing}. Available columns: {list(df.columns)}")
 
 
+def deduplicate_semantic_columns(cols: list[str]) -> list[str]:
+    """Drop duplicate semantic metadata columns, treating task and modality as one feature."""
+    preferred={"modality":["modality","Modality","task","Task"]}
+    out=[]; seen={}; dropped=[]
+    for col in cols:
+        feature=canonical_feature_name(col)
+        if feature not in seen:
+            seen[feature]=col; out.append(col); continue
+        current=seen[feature]
+        priority=preferred.get(feature)
+        if priority and col in priority and current in priority and priority.index(col) < priority.index(current):
+            out[out.index(current)]=col; seen[feature]=col; dropped.append(current)
+        else:
+            dropped.append(col)
+    if dropped:
+        LOGGER.info("[PLOT GROUP] removed duplicate semantic columns %s because they are equivalent to modality", dropped)
+    return out
+
+
 def build_composite_group_column(df: pd.DataFrame, cols: list[str], output_col: str, sep: str = " | ", unknown_value: str = "Unknown") -> pd.DataFrame:
     """Build an internal grouping column by concatenating multiple metadata columns."""
     out=df.copy()
+    cols=deduplicate_semantic_columns(cols)
     if not cols:
         return out
     pieces=[out[col].where(out[col].notna(), unknown_value).astype(str) for col in cols]
@@ -121,7 +141,10 @@ def infer_x_columns(df: pd.DataFrame, user_x: str | None = None, auto_plot_mappi
     LOGGER.info("[PLOT X] user_x=%s parsed_x_cols=%s", user_x, parsed)
     if parsed:
         _validate_columns_exist(df, parsed, "x")
-        return parsed
+        deduped=deduplicate_semantic_columns(parsed)
+        LOGGER.info("[PLOT X] original x_cols=%s", parsed)
+        LOGGER.info("[PLOT X] deduplicated x_cols=%s", deduped)
+        return deduped
     if not auto_plot_mapping:
         raise ValueError("No --x columns specified and auto plot mapping is disabled")
     analysis_col=_preferred_existing_column(df, "analysis_group")
@@ -130,7 +153,7 @@ def infer_x_columns(df: pd.DataFrame, user_x: str | None = None, auto_plot_mappi
     composite=[_preferred_existing_column(df, f) for f in _X_COMPOSITE_PRIORITY]
     composite=[c for c in composite if c]
     if composite and any(df[c].dropna().nunique() >= 2 for c in composite):
-        return composite
+        return deduplicate_semantic_columns(composite)
     for feature in _X_FALLBACK_PRIORITY:
         col=_preferred_existing_column(df, feature)
         if col and df[col].dropna().nunique() >= 2:
@@ -148,7 +171,7 @@ def get_consumed_metadata_features(x_cols: list[str], hue: str | None) -> set[st
     if hue:
         consumed.add(canonical_feature_name(hue))
     if "analysis_group" in consumed:
-        consumed.update({"analysis_group","center","organ","task"})
+        consumed.update({"analysis_group","center","organ","modality"})
     return consumed
 
 
@@ -208,8 +231,11 @@ def infer_shade_by(df: pd.DataFrame, x_cols=None, hue: str | None = None, shade_
     LOGGER.info("[PLOT SHADE] consumed_features=%s", consumed)
     LOGGER.info("[PLOT SHADE] remaining_features=%s", remaining)
     if str(shade_by).strip().lower() != "auto":
-        cols=parse_column_list(shade_by)
-        _validate_columns_exist(df, cols, "shade_by")
+        original_cols=parse_column_list(shade_by)
+        _validate_columns_exist(df, original_cols, "shade_by")
+        cols=deduplicate_semantic_columns(original_cols)
+        LOGGER.info("[PLOT SHADE] original shade_by_cols=%s", original_cols)
+        LOGGER.info("[PLOT SHADE] deduplicated shade_by_cols=%s", cols)
         for col in cols:
             feature=canonical_feature_name(col)
             if feature in consumed:
@@ -468,6 +494,64 @@ def _apply_plot_layout(fig, ax, has_legend: bool, right: float = 0.95, bottom: f
         fig.subplots_adjust(right=right, bottom=bottom)
 
 
+def compute_group_positions(x_levels: list[str], color_levels_by_x: dict[str, list[str]], group_gap: float = 1.4, within_group_gap: float = 0.18) -> dict[tuple[str, str | None], float]:
+    """Compute stable x positions for each x group and optional color subgroup."""
+    positions={}
+    for idx, x_level in enumerate(x_levels):
+        center=idx * group_gap
+        color_levels=color_levels_by_x.get(x_level, [None]) or [None]
+        offsets=(np.arange(len(color_levels)) - (len(color_levels) - 1) / 2.0) * within_group_gap
+        for color_level, offset in zip(color_levels, offsets):
+            positions[(x_level, color_level)]=float(center + offset)
+    return positions
+
+
+def infer_violin_width(n_subgroups_max: int, within_group_gap: float, default_width: float = 0.16) -> float:
+    """Return a stable violin width matched to within-group spacing."""
+    return float(min(default_width, within_group_gap * 0.9))
+
+
+def _draw_positioned_violins(ax, sub: pd.DataFrame, x_col: str, y_col: str, color_col: str | None, palette: dict, group_gap: float = 1.4, within_group_gap: float = 0.18, violin_width: float = 0.16):
+    """Draw violins at manually controlled positions with stable group spacing."""
+    x_levels=list(pd.Series(sub[x_col]).dropna().astype(str).unique())
+    if color_col:
+        color_levels_by_x={x_level:list(pd.Series(sub.loc[sub[x_col].astype(str) == x_level, color_col]).dropna().astype(str).unique()) for x_level in x_levels}
+    else:
+        color_levels_by_x={x_level:[None] for x_level in x_levels}
+    max_subgroups=max((len(v) for v in color_levels_by_x.values()), default=1)
+    width=infer_violin_width(max_subgroups, within_group_gap, violin_width)
+    LOGGER.info("[PLOT SPACING] n_x_groups=%s", len(x_levels))
+    LOGGER.info("[PLOT SPACING] max_subgroups_per_x=%s", max_subgroups)
+    LOGGER.info("[PLOT SPACING] group_gap=%s within_group_gap=%s violin_width=%s", group_gap, within_group_gap, width)
+    if len(x_levels) == 1:
+        LOGGER.info("[PLOT SPACING] single x group detected; using same within_group_gap and symmetric xlim padding")
+    positions=compute_group_positions(x_levels, color_levels_by_x, group_gap, within_group_gap)
+    all_positions=[]; legend_handles={}; default_color=sns.color_palette("tab10", n_colors=1)[0]
+    for (x_level, color_level), pos in positions.items():
+        mask=sub[x_col].astype(str) == x_level
+        if color_col:
+            mask &= sub[color_col].astype(str) == str(color_level)
+        vals=pd.to_numeric(sub.loc[mask, y_col], errors="coerce").dropna()
+        if vals.empty:
+            continue
+        parts=ax.violinplot([vals.to_numpy()], positions=[pos], widths=width, showmeans=False, showmedians=True, showextrema=False)
+        facecolor=palette.get(str(color_level), default_color) if color_col else default_color
+        for body in parts.get("bodies", []):
+            body.set_facecolor(facecolor); body.set_edgecolor("black"); body.set_alpha(0.85); body.set_linewidth(0.8)
+        if "cmedians" in parts:
+            parts["cmedians"].set_color("black"); parts["cmedians"].set_linewidth(1.0)
+        all_positions.append(pos)
+        if color_col and str(color_level) not in legend_handles:
+            legend_handles[str(color_level)]=plt.Line2D([0], [0], marker="s", linestyle="", color=facecolor, label=str(color_level))
+    centers=[idx * group_gap for idx in range(len(x_levels))]
+    ax.set_xticks(centers); ax.set_xticklabels(x_levels)
+    if all_positions:
+        ax.set_xlim(min(all_positions) - 0.5, max(all_positions) + 0.5)
+    if color_col and legend_handles:
+        ax.legend(handles=list(legend_handles.values()), title=color_col)
+    return positions, width
+
+
 def _save_plot_figure(fig, path: Path) -> None:
     """Save a figure without cropping outside legends."""
     fig.savefig(path, dpi=600, bbox_inches="tight", pad_inches=0.2)
@@ -480,6 +564,7 @@ def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|Non
     if case_paths:
         case_motion_df=standardize_plot_metadata_columns(load_and_merge_metric_csvs(case_paths, "case_motion", LOGGER)); frames.append(case_motion_df)
     plot_df=standardize_plot_metadata_columns(pd.concat(frames, ignore_index=True, sort=False))
+    LOGGER.info("[PLOT FEATURE] canonical feature mapping: Task/task/Modality/modality -> modality")
     x_cols, final_x, final_hue=infer_plot_mapping(plot_df, x, hue)
     if final_x == "_x_group":
         plot_df=build_composite_group_column(plot_df, x_cols, "_x_group")
@@ -519,7 +604,7 @@ def plot_violin(metrics_csv, case_motion_csv=None, output_dir=None, hue: str|Non
         LOGGER.info("[PLOT SIZE] final_figsize=%s", figsize)
         right, bottom=infer_layout_adjustment(max_xtick_label_len, bool(plot_hue), n_legend_items, final_x == "_x_group")
         fig, ax=plt.subplots(figsize=figsize)
-        sns.violinplot(data=sub, x=final_x, y=m, hue=plot_hue, palette=palette or None, inner="box", cut=0, ax=ax)
+        _draw_positioned_violins(ax, sub, final_x, m, plot_hue, palette or {})
         ax.set_title(m, fontsize=12); ax.set_xlabel(final_x); ax.set_ylabel(m)
         _apply_plot_layout(fig, ax, has_legend=bool(plot_hue), right=right, bottom=bottom)
         for ext in ["png","pdf","svg"]:
