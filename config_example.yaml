@@ -38,3 +38,7 @@ seg_mean_organs:
 
 min_mask_volume_voxels: 20
 severe_volume_ratio_threshold: 0.20
+
+# Plotting is configured from the CLI rather than this YAML file. Multiple
+# combined_metrics.csv and case_motion_metrics.csv files can be passed to:
+# python -m registration_metrics.cli plot --metrics-csv a.csv b.csv --case-motion-csv motion_a.csv motion_b.csv --output-dir ./metrics_all/figures --save-statistics
