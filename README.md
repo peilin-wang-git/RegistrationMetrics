@@ -101,6 +101,40 @@ The plot command saves merged plot inputs and descriptive statistics in the plot
 
 When multiple CSV files have different columns, they are concatenated with `pd.concat(sort=False)`, so missing values become `NaN`. Plotting drops `NaN` rows for the current x/hue/metric combination, and statistics ignore `NaN` values while reporting `missing_count`. `Frame`/`frame` metadata is excluded from metric statistics, and `source_csv` records the source file for each merged row.
 
+
+Color encoding for plots:
+
+- `--x` controls the x-axis grouping and can be one metadata column (`--x modality`) or comma-separated columns (`--x center,organ,modality`). Multiple x columns create a composite x-axis group such as `center | organ | modality`.
+- `--hue` controls the primary color family and remains a single metadata column.
+- `--shade-by` controls secondary within-hue shade encoding. The default is `auto`, which uses only metadata features that are still varying after excluding the features already covered by x and hue.
+- If x and hue already cover all varying metadata features, `--shade-by auto` disables shade encoding and uses only the primary hue colors.
+- `--shade-by none` disables shade encoding explicitly.
+- `--max-shade-levels` controls when a warning is logged for many shade groups; plotting still proceeds.
+
+For example, this uses a composite x-axis from Center + Organ + Modality and Method as the primary color. If no other metadata features vary, shade encoding is disabled automatically:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv a.csv b.csv c.csv \
+  --output-dir ./figures \
+  --x center,organ,modality \
+  --hue method \
+  --save-statistics
+```
+
+This uses Center as the x-axis, Method as the primary color family, and automatically shades by remaining varying metadata such as Modality, Task, or Organ:
+
+```bash
+python -m registration_metrics.cli plot \
+  --metrics-csv a.csv b.csv c.csv \
+  --output-dir ./figures \
+  --x center \
+  --hue method \
+  --shade-by auto \
+  --save-statistics
+```
+
+
 ```bash
 python -m registration_metrics.cli all \
   --config config.yaml \
