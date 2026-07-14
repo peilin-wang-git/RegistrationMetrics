@@ -8,6 +8,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
+from matplotlib.patches import Patch
 LOGGER=logging.getLogger("registration_metrics")
 DEFAULT_METRICS=["nmi_warped_fixed","ssim_warped_fixed","lcc_warped_fixed","dice_foreground_warped_fixed","iou_foreground_warped_fixed","hd95_foreground_warped_fixed","assd_foreground_warped_fixed","folding_ratio","jacobian_mean","VertebraNCC_warped_fixed","MovementError","MovementError_AP","MovementError_RL","MovementError_SI","MotionPCC_AllDirections","MotionAMD_AllDirections","MotionMAPE_percent_AllDirections","MotionRMSE_AllDirections","AmplitudeAMD"]
 _METADATA_ALIASES={"Method":"method","Center":"center","Task":"task","Organ":"organ","AnalysisGroup":"analysis_group","CaseID":"case_id","Frame":"frame"}
@@ -512,6 +513,18 @@ def _figure_size_for_x_groups(n_x_groups: int) -> tuple[float, float]:
     return infer_figure_size(n_x_groups, 0, 0, False)
 
 
+
+def _legend_title_for_color_group(color_group_col: str) -> str:
+    """Return a user-friendly legend title for the active color grouping column."""
+    titles={"_color_group":"Color group", "method":"Method", "center":"Center"}
+    return titles.get(color_group_col, str(color_group_col))
+
+
+def _create_manual_legend_handles(color_group_order: list[str], palette: dict, violin_alpha: float = 0.85) -> list[Patch]:
+    """Create explicit patch handles so manually positioned violins have full legend entries."""
+    default_color=sns.color_palette("tab10", n_colors=1)[0]
+    return [Patch(facecolor=palette.get(str(color_group), default_color), edgecolor="black", alpha=violin_alpha, label=str(color_group)) for color_group in color_group_order]
+
 def _apply_plot_layout(fig, ax, has_legend: bool, right: float = 0.95, bottom: float = 0.22) -> None:
     """Move legends outside the plot and lightly rotate x tick labels."""
     for label in ax.get_xticklabels():
@@ -523,9 +536,11 @@ def _apply_plot_layout(fig, ax, has_legend: bool, right: float = 0.95, bottom: f
     legend=ax.get_legend()
     if has_legend and legend is not None:
         title=legend.get_title().get_text()
-        handles, labels=ax.get_legend_handles_labels()
+        handles=list(getattr(legend, "legend_handles", getattr(legend, "legendHandles", [])))
+        labels=[text.get_text() for text in legend.get_texts()]
+        ncol=1 if len(labels) <= 15 else 2
         legend.remove()
-        ax.legend(handles, labels, title=title, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=True, fontsize=8, title_fontsize=9)
+        ax.legend(handles=handles, labels=labels, title=title, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=True, fontsize=8, title_fontsize=9, ncol=ncol)
         LOGGER.info("[PLOT LAYOUT] legend moved outside figure")
         LOGGER.info("[PLOT LAYOUT] legend_loc=upper left bbox_to_anchor=(1.02,1.0)")
         fig.subplots_adjust(right=right, bottom=bottom)
@@ -566,7 +581,7 @@ def _draw_positioned_violins(ax, sub: pd.DataFrame, x_col: str, y_col: str, colo
     if len(x_levels) == 1:
         LOGGER.info("[PLOT SPACING] single x group detected; using same within_group_gap and symmetric xlim padding")
     positions=compute_group_positions(x_levels, color_levels_by_x, group_gap, within_group_gap)
-    all_positions=[]; legend_handles={}; default_color=sns.color_palette("tab10", n_colors=1)[0]
+    all_positions=[]; default_color=sns.color_palette("tab10", n_colors=1)[0]
     for (x_level, color_level), pos in positions.items():
         mask=sub[x_col].astype(str) == x_level
         if color_col:
@@ -581,14 +596,23 @@ def _draw_positioned_violins(ax, sub: pd.DataFrame, x_col: str, y_col: str, colo
         if "cmedians" in parts:
             parts["cmedians"].set_color("black"); parts["cmedians"].set_linewidth(1.0)
         all_positions.append(pos)
-        if color_col and str(color_level) not in legend_handles:
-            legend_handles[str(color_level)]=plt.Line2D([0], [0], marker="s", linestyle="", color=facecolor, label=str(color_level))
     centers=[idx * group_gap for idx in range(len(x_levels))]
     ax.set_xticks(centers); ax.set_xticklabels(x_levels)
     if all_positions:
         ax.set_xlim(min(all_positions) - 0.5, max(all_positions) + 0.5)
-    if color_col and legend_handles:
-        ax.legend(handles=list(legend_handles.values()), title=color_col)
+    if color_col:
+        color_group_order=list(pd.Series(sub[color_col]).dropna().astype(str).unique())
+        LOGGER.info("[PLOT LEGEND] color_group_col=%s", color_col)
+        LOGGER.info("[PLOT LEGEND] n_legend_items=%s", len(color_group_order))
+        LOGGER.info("[PLOT LEGEND] first_labels=%s", color_group_order[:5])
+        if color_group_order:
+            legend_handles=_create_manual_legend_handles(color_group_order, palette, violin_alpha=0.85)
+            LOGGER.info("[PLOT LEGEND] manually created Patch handles for legend")
+            ncol=1 if len(legend_handles) <= 15 else 2
+            ax.legend(handles=legend_handles, title=_legend_title_for_color_group(color_col), loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=True, fontsize=8, title_fontsize=9, ncol=ncol)
+            LOGGER.info("[PLOT LEGEND] legend placed outside right")
+        else:
+            LOGGER.warning("[PLOT LEGEND WARNING] no legend items found for color_group_col=%s; check _color_group values and palette keys", color_col)
     return positions, width
 
 

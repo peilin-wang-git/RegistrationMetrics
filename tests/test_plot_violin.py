@@ -565,3 +565,62 @@ def test_debug_csv_contains_task_and_modality_but_grouping_uses_task(tmp_path):
     assert "Modality" in debug.columns
     assert "Task" in debug.columns
     assert debug["_x_group"].astype(str).str.contains("DWI->4D|T1w->4D", regex=True).any()
+
+from registration_metrics.plot_violin import _create_manual_legend_handles, _draw_positioned_violins
+
+
+def test_manual_legend_has_full_labels():
+    color_group_order = [
+        "FireANTs | DWI->4D | Institution A | Liver | DWI->4D",
+        "SAMReg | DWI->4D | Institution A | Liver | DWI->4D",
+    ]
+    palette = {color_group_order[0]: "#ff0000", color_group_order[1]: "#0000ff"}
+
+    handles = _create_manual_legend_handles(color_group_order, palette)
+
+    assert [handle.get_label() for handle in handles] == color_group_order
+
+
+def test_legend_not_title_only():
+    color_group_order = [
+        "FireANTs | DWI->4D | Institution A | Liver | DWI->4D",
+        "SAMReg | DWI->4D | Institution A | Liver | DWI->4D",
+    ]
+    df = pd.DataFrame({
+        "_x_group": ["Institution A | Liver"] * 4,
+        "_color_group": [color_group_order[0], color_group_order[0], color_group_order[1], color_group_order[1]],
+        "metric": [0.1, 0.2, 0.3, 0.4],
+    })
+    palette = {color_group_order[0]: "#ff0000", color_group_order[1]: "#0000ff"}
+    fig, ax = plt.subplots(figsize=(4, 3))
+
+    _draw_positioned_violins(ax, df, "_x_group", "metric", "_color_group", palette)
+
+    legend = ax.get_legend()
+    assert legend is not None
+    assert legend.get_title().get_text() == "Color group"
+    assert [text.get_text() for text in legend.get_texts()] == color_group_order
+    plt.close(fig)
+
+
+def test_color_group_palette_keys_match_legend_order():
+    color_group_order = [
+        "FireANTs | DWI->4D | Institution A | Liver | DWI->4D",
+        "SAMReg | DWI->4D | Institution A | Liver | DWI->4D",
+    ]
+    palette = {color_group_order[0]: "#ff0000", color_group_order[1]: "#0000ff"}
+
+    handles = _create_manual_legend_handles(color_group_order, palette)
+
+    assert list(palette.keys()) == color_group_order
+    assert all(handle.get_label() in palette for handle in handles)
+
+
+def test_no_legend_when_no_color_group():
+    df = pd.DataFrame({"_x_group": ["A", "A"], "metric": [0.1, 0.2]})
+    fig, ax = plt.subplots(figsize=(4, 3))
+
+    _draw_positioned_violins(ax, df, "_x_group", "metric", None, {})
+
+    assert ax.get_legend() is None
+    plt.close(fig)
