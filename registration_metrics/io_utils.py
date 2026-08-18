@@ -86,6 +86,99 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_MANIFEST_STATUS_PRIORITY = {
+    "success": 5,
+    "completed": 4,
+    "skipped_complete": 3,
+    "skipped": 2,
+    "failed": 1,
+}
+
+
+def _resolve_dedup_key_columns(df: pd.DataFrame, dedup_key: str) -> list[str]:
+    """Resolve a user-facing manifest deduplication key to normalized columns."""
+    key = (dedup_key or "auto").strip()
+    if key == "auto":
+        columns = ["case_id"] if "case_id" in df.columns else ["fixed_img_path", "moving_img_path"]
+    elif key == "case_id":
+        columns = ["case_id"]
+    elif key == "image_paths":
+        columns = ["fixed_img_path", "moving_img_path"]
+    elif key == "fixed_moving_names":
+        columns = ["fixed_img_name", "moving_img_name"]
+    else:
+        columns = [column.strip() for column in key.split(",") if column.strip()]
+    missing = [column for column in columns if column not in df.columns]
+    if not columns or missing:
+        raise ValueError(f"Invalid dedup key {dedup_key!r}; missing columns: {missing}")
+    return columns
+
+
+def deduplicate_manifest_rows(
+    df: pd.DataFrame,
+    dedup_key="auto",
+    keep_policy="prefer_success_latest",
+    log_prefix="[MANIFEST DEDUP]",
+) -> pd.DataFrame:
+    """Return an in-memory manifest with one best row per case.
+
+    Diagnostics, including the removed rows, are attached to ``DataFrame.attrs`` so
+    callers can save them without changing this helper's simple return contract.
+    """
+    if keep_policy != "prefer_success_latest":
+        raise ValueError(f"Unsupported manifest dedup keep policy: {keep_policy}")
+    work = df.copy()
+    key_cols = _resolve_dedup_key_columns(work, dedup_key)
+    work["_dedup_original_order"] = np.arange(len(work))
+    status = work["status"].fillna("").astype(str).str.strip().str.lower() if "status" in work else pd.Series("", index=work.index)
+    work["_dedup_status_priority"] = status.map(_MANIFEST_STATUS_PRIORITY).fillna(0)
+    completed = work["completed_at"] if "completed_at" in work else pd.Series(pd.NaT, index=work.index)
+    work["_dedup_completed_at"] = pd.to_datetime(completed, errors="coerce", utc=True)
+    duplicate_mask = work.duplicated(key_cols, keep=False)
+    duplicate_case_keys = int(work.loc[duplicate_mask, key_cols].drop_duplicates().shape[0])
+    before_counts = status.value_counts(dropna=False).to_dict()
+    sorted_work = work.sort_values(
+        key_cols + ["_dedup_status_priority", "_dedup_completed_at", "_dedup_original_order"],
+        ascending=[True] * len(key_cols) + [False, False, False],
+        na_position="last",
+        kind="stable",
+    )
+    kept = sorted_work.drop_duplicates(key_cols, keep="first")
+    removed = work.loc[~work.index.isin(kept.index)].copy()
+    kept = kept.sort_values("_dedup_original_order", kind="stable")
+    internal = ["_dedup_original_order", "_dedup_status_priority", "_dedup_completed_at"]
+    output = kept.drop(columns=internal)
+    after_status = output["status"].fillna("").astype(str).str.strip().str.lower() if "status" in output else pd.Series("", index=output.index)
+    summary = {
+        "input_rows": len(df), "output_rows": len(output),
+        "duplicate_case_keys": duplicate_case_keys,
+        "duplicate_rows_removed": len(removed), "dedup_key_cols": str(key_cols),
+        "status_counts_before": str(before_counts),
+        "status_counts_after": str(after_status.value_counts(dropna=False).to_dict()),
+    }
+    LOGGER.info("%s input_rows=%s", log_prefix, len(df))
+    LOGGER.info("%s dedup_key_cols=%s", log_prefix, key_cols)
+    LOGGER.info("%s duplicate_case_keys=%s", log_prefix, duplicate_case_keys)
+    LOGGER.info("%s duplicate_rows_removed=%s", log_prefix, len(removed))
+    LOGGER.info("%s output_rows=%s", log_prefix, len(output))
+    LOGGER.info("%s status_counts_before=%s", log_prefix, before_counts)
+    LOGGER.info("%s status_counts_after=%s", log_prefix, after_status.value_counts(dropna=False).to_dict())
+    for example_number, (_, group) in enumerate(work.loc[duplicate_mask].groupby(key_cols, dropna=False, sort=False)):
+        if example_number >= 5:
+            break
+        winner = kept.loc[kept.index.intersection(group.index)].iloc[0]
+        key_value = tuple(group.iloc[0][c] for c in key_cols)
+        if len(key_value) == 1: key_value = key_value[0]
+        LOGGER.info("[MANIFEST DEDUP EXAMPLE] key=%s rows=%s statuses=%s kept_status=%s kept_completed_at=%s", key_value, len(group), group.get("status", pd.Series([""] * len(group))).tolist(), winner.get("status", ""), winner.get("completed_at", ""))
+    removed["dedup_key"] = removed.apply(lambda r: "|".join(str(r[c]) for c in key_cols), axis=1)
+    removed["reason_removed"] = "lower status priority, older completed_at, or earlier CSV row"
+    removed["row_index"] = removed["_dedup_original_order"]
+    output.attrs["dedup_summary"] = summary
+    output.attrs["duplicates_removed"] = removed.drop(columns=internal, errors="ignore")
+    output.attrs["dedup_key_cols"] = key_cols
+    return output
+
+
 def normalize_intensity_0_1(image: np.ndarray, image_name: str, case_id: str, row_index: int) -> np.ndarray:
     """Normalize one intensity image to [0, 1] using finite-voxel min/max."""
     x = np.asarray(image, dtype=np.float32)
@@ -164,19 +257,56 @@ def compute_single_case_task(task: CaseTask) -> dict[str, Any]:
         msg=f"{type(e).__name__}: {e}"; LOGGER.error("[ERROR] case=%s error=%s traceback=%s", case, msg, traceback.format_exc(limit=3)); er=base|{"status":"error","error_message":msg,"runtime_seconds":time.time()-t0}; return {"success":False,"row_index":task.row_index,"case_id":case,"result_rows":[er],"error_rows":[er],"runtime_seconds":time.time()-t0}
 
 
-def _build_tasks(config: dict, labels: dict[int, str], selected_seg_organs: list[str], selected_seg_mean_organs: list[str], enable_global: bool, enable_seg: bool, enable_dvf: bool, enable_motion: bool, enable_vertebra: bool, use_gpu: bool, requested_device: str, ncc_batch_size: int, verbose_seg_mean: bool, min_mask_volume_voxels: int, severe_volume_ratio_threshold: float, nmi_bins: int) -> list[CaseTask]:
-    tasks=[]
+def _build_tasks(config: dict, labels: dict[int, str], selected_seg_organs: list[str], selected_seg_mean_organs: list[str], enable_global: bool, enable_seg: bool, enable_dvf: bool, enable_motion: bool, enable_vertebra: bool, use_gpu: bool, requested_device: str, ncc_batch_size: int, verbose_seg_mean: bool, min_mask_volume_voxels: int, severe_volume_ratio_threshold: float, nmi_bins: int, output_dir: Path | None = None, deduplicate_cases: bool = True, dedup_key: str = "auto") -> list[CaseTask]:
+    tasks=[]; summaries=[]; removed_frames=[]; used_frames=[]
     for method, groups in config.items():
         if method in {"label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold", "nmi_bins"}: continue
         for analysis_group, g in groups.items():
-            df=normalize_columns(pd.read_csv(g["csv_path"])); total_rows=len(df)
+            csv_path = g["csv_path"]
+            df=normalize_columns(pd.read_csv(csv_path))
+            if deduplicate_cases:
+                df = deduplicate_manifest_rows(df, dedup_key=dedup_key)
+                summary = dict(df.attrs["dedup_summary"], csv_path=str(csv_path), method=method, analysis_group=analysis_group)
+                summaries.append(summary)
+                removed = df.attrs["duplicates_removed"].copy()
+                if not removed.empty:
+                    removed["csv_path"] = str(csv_path); removed["Method"] = method; removed["AnalysisGroup"] = analysis_group
+                    removed_frames.append(removed)
+            used = df.copy(); used.attrs = {}; used["csv_path"] = str(csv_path); used["Method"] = method; used["AnalysisGroup"] = analysis_group
+            used_frames.append(used)
+            total_rows=len(df)
             for row_index, r in df.iterrows():
                 tasks.append(CaseTask(method,g.get("center"),g.get("modality"),g.get("task"),g.get("organ"),analysis_group,g.get("csv_path"),int(row_index),total_rows,r.to_dict(),labels,selected_seg_organs,selected_seg_mean_organs,enable_global,enable_seg,enable_dvf,enable_motion,enable_vertebra,use_gpu,requested_device,ncc_batch_size,verbose_seg_mean,min_mask_volume_voxels,severe_volume_ratio_threshold,nmi_bins))
-    return tasks
+    input_tasks = len(tasks); unique_tasks=[]; seen=set()
+    for task in tasks:
+        row = task.row_dict
+        case_key = row.get("case_id")
+        if pd.isna(case_key) or case_key is None:
+            case_key = (row.get("fixed_img_path"), row.get("moving_img_path"))
+        key=(task.method,task.center,task.task,task.organ,task.analysis_group,case_key)
+        if key not in seen:
+            seen.add(key); unique_tasks.append(task)
+    LOGGER.info("[TASK DEDUP] input_tasks=%s", input_tasks)
+    LOGGER.info("[TASK DEDUP] duplicate_tasks_removed=%s", input_tasks-len(unique_tasks))
+    LOGGER.info("[TASK DEDUP] output_tasks=%s", len(unique_tasks))
+    if output_dir is not None:
+        pd.DataFrame(summaries).to_csv(output_dir/"manifest_dedup_summary.csv", index=False)
+        removed_columns=["dedup_key","row_index","case_id","status","completed_at","fixed_img_path","moving_img_path","warped_img_path","transform_path","reason_removed"]
+        removed_all=pd.concat(removed_frames, ignore_index=True) if removed_frames else pd.DataFrame(columns=removed_columns)
+        for column in removed_columns:
+            if column not in removed_all: removed_all[column]=np.nan
+        removed_all.to_csv(output_dir/"manifest_duplicates_removed.csv", index=False)
+        (pd.concat(used_frames, ignore_index=True) if used_frames else pd.DataFrame()).to_csv(output_dir/"manifest_deduplicated_used_for_metrics.csv", index=False)
+    return unique_tasks
 
 
 def _finalize_outputs(tasks: list[CaseTask], all_rows: list[dict], errors: list[dict], outdir: Path, progress_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    combined=pd.DataFrame(all_rows)
+    combined=pd.read_csv(progress_path) if progress_path.exists() and progress_path.stat().st_size else pd.DataFrame(all_rows)
+    result_key=[c for c in ["Method","Center","Task","Organ","case_id"] if c in combined.columns]
+    if "case_id" in result_key:
+        before=len(combined); combined=combined.drop_duplicates(result_key, keep="last")
+        LOGGER.info("[RESULT DEDUP] duplicate result rows removed=%s", before-len(combined))
+        combined.to_csv(progress_path, index=False)
     for c in REQUIRED_OUTPUT_COLUMNS:
         if c not in combined: combined[c]=np.nan
     combined.to_csv(outdir/"combined_metrics.csv", index=False); LOGGER.info("[SAVE] combined_metrics.csv=%s", outdir/"combined_metrics.csv")
@@ -187,10 +317,10 @@ def _finalize_outputs(tasks: list[CaseTask], all_rows: list[dict], errors: list[
         if key in saved_groups:
             continue
         saved_groups.add(key)
-        group_rows=[r for r in all_rows if r.get("Method") == task.method and r.get("AnalysisGroup") == task.analysis_group]
-        if group_rows:
+        group_rows=combined[(combined.get("Method") == task.method) & (combined.get("AnalysisGroup") == task.analysis_group)] if {"Method","AnalysisGroup"}.issubset(combined.columns) else pd.DataFrame()
+        if not group_rows.empty:
             p=outdir/f"metrics_{task.method}_{task.center}_{task.modality}_{task.organ}.csv".replace('/','_').replace(' ','_')
-            pd.DataFrame(group_rows).to_csv(p,index=False); LOGGER.info("[SAVE] group detailed CSV=%s", p)
+            group_rows.to_csv(p,index=False); LOGGER.info("[SAVE] group detailed CSV=%s", p)
     save_summary_from_progress(progress_path, outdir)
     return combined, pd.DataFrame(), pd.DataFrame()
 
@@ -213,7 +343,7 @@ def _run_single_process(tasks: list[CaseTask], progress_path: Path, error_path: 
     return all_rows, errors, completed, failed
 
 
-def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, enable_seg=True, enable_dvf=True, enable_motion=True, enable_vertebra=True, use_gpu: bool = False, requested_device: str = "cuda:0", gpu_metrics: str = "all", ncc_batch_size: int = 64, seg_metric_organs: str | list[str] | None = None, seg_mean_organs: str | list[str] | None = None, verbose_seg_mean: bool = False, min_mask_volume_voxels: int | None = None, severe_volume_ratio_threshold: float | None = None, num_workers: int = 1) -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, enable_seg=True, enable_dvf=True, enable_motion=True, enable_vertebra=True, use_gpu: bool = False, requested_device: str = "cuda:0", gpu_metrics: str = "all", ncc_batch_size: int = 64, seg_metric_organs: str | list[str] | None = None, seg_mean_organs: str | list[str] | None = None, verbose_seg_mean: bool = False, min_mask_volume_voxels: int | None = None, severe_volume_ratio_threshold: float | None = None, num_workers: int = 1, deduplicate_cases: bool = True, dedup_key: str = "auto") -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
     """Compute metrics for configured CSV rows as pre-split 3D cases with optional multiprocessing."""
     outdir=Path(output_dir); outdir.mkdir(parents=True, exist_ok=True); labels=merged_label_map(config); selected_seg_organs=resolve_seg_metric_organs(config, seg_metric_organs); selected_seg_mean_organs=resolve_seg_mean_organs(config, seg_mean_organs); min_mask_volume_voxels, severe_volume_ratio_threshold = resolve_mask_quality_thresholds(config, min_mask_volume_voxels, severe_volume_ratio_threshold); progress_path=outdir/"detailed_progress.csv"; error_path=outdir/"error_log.csv"; nmi_bins=int(config.get("nmi_bins", 64))
     LOGGER.info("[CONFIG] methods=%s output_dir=%s", list(config.keys()), outdir)
@@ -224,7 +354,7 @@ def compute_from_config(config: dict, output_dir: str|Path, enable_global=True, 
         if method in {"label_map", "seg_metric_organs", "seg_mean_organs", "min_mask_volume_voxels", "severe_volume_ratio_threshold", "nmi_bins"}: continue
         for analysis_group, g in groups.items():
             LOGGER.info("[GROUP START] input_csv=%s method=%s group=%s center=%s modality=%s task=%s organ=%s use_gpu=%s requested_device=%s", g.get("csv_path"), method, analysis_group, g.get('center'), g.get('modality'), g.get('task'), g.get('organ'), use_gpu, requested_device)
-    tasks=_build_tasks(config,labels,selected_seg_organs,selected_seg_mean_organs,enable_global,enable_seg,enable_dvf,enable_motion,enable_vertebra,use_gpu,requested_device,ncc_batch_size,verbose_seg_mean,min_mask_volume_voxels,severe_volume_ratio_threshold,nmi_bins)
+    tasks=_build_tasks(config,labels,selected_seg_organs,selected_seg_mean_organs,enable_global,enable_seg,enable_dvf,enable_motion,enable_vertebra,use_gpu,requested_device,ncc_batch_size,verbose_seg_mean,min_mask_volume_voxels,severe_volume_ratio_threshold,nmi_bins,outdir,deduplicate_cases,dedup_key)
     all_rows=[]; errors=[]; completed=0; failed=0; workers=max(int(num_workers or 1), 1)
     LOGGER.info("[MP START] num_workers=%s", workers)
     if workers <= 1:
