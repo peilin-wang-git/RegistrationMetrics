@@ -217,6 +217,20 @@ python -m registration_metrics.cli all \
 
 During `compute`/`all`, each input CSV row is treated as one pre-split 3D case; 4D images or segmentations are skipped with `[SKIP NON-3D]`. Results are appended to `detailed_progress.csv` after each input CSV row finishes. Failures are appended to `error_log.csv` immediately. With `--num-workers > 1`, worker processes compute cases and the main process is the only writer for progress/error CSV files as futures complete. After processing completes, the program reloads `detailed_progress.csv` from disk and writes `summary_by_group.csv` and `summary_overall.csv`. Variance in summaries uses pandas `var` default `ddof=1`.
 
+### Manifest case deduplication
+
+An interrupted and restarted inference run can append multiple `manifest.csv` rows for the same case (for example, an earlier `success` and a later `skipped_complete`). Metrics therefore deduplicate **each method/group manifest independently in memory** before creating case tasks. The original manifest is never changed. With `--dedup-key auto` (the default), `case_id` is used when present, otherwise `fixed_img_path,moving_img_path` is used.
+
+The retained-row priority is `success > completed > skipped_complete > skipped > failed > other/blank`. Within the same priority, the newest parseable `completed_at` wins; the later CSV row breaks any remaining tie. Task construction and final `combined_metrics.csv` writing also include duplicate safety checks, so old duplicate progress rows do not propagate to final summaries.
+
+Every output directory receives these diagnostics:
+
+* `manifest_dedup_summary.csv`
+* `manifest_duplicates_removed.csv`
+* `manifest_deduplicated_used_for_metrics.csv`
+
+Disable manifest deduplication with `--no-deduplicate-cases`. Select another key with `--dedup-key case_id`, `--dedup-key image_paths`, or an explicit list such as `--dedup-key fixed_img_path,moving_img_path`.
+
 ## GPU acceleration
 
 CPU remains the default. Optional GPU acceleration can be requested with:
